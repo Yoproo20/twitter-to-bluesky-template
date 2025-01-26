@@ -1,7 +1,4 @@
 # Twitter to Bluesky Bot
-
-This project is a bot that automatically posts tweets from a specified Twitter account to a Bluesky account. It uses the Twitter API to fetch tweets and the Bluesky API to post them.
-
 ## Prerequisites
 
 - Python 3.7 or higher
