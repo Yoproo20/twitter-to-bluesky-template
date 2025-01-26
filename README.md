@@ -13,7 +13,7 @@ This project is a bot that automatically posts tweets from a specified Twitter a
 
 ### 1. Clone the Repository
 ```bash
-git clone https://github.com/yourusername/twitter-to-bluesky-bot.git
+git clone https://github.com/Yoproo20/twitter-to-bluesky-template.git
 cd twitter-to-bluesky-bot
 ```
 
@@ -27,7 +27,7 @@ pip install -r requirements.txt
 
 ### 3. Obtain API Keys
 
-#### Twitter API
+#### Twitter Scraping
 
 - **Twitter Username and Password:** Use your Twitter account credentials. It's recommended to use an alternate account for security reasons.
 
