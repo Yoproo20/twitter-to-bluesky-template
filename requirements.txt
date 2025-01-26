@@ -1,0 +1,5 @@
+asyncio
+requests
+python-dotenv
+tweety
+atproto
