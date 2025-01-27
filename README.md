@@ -26,7 +26,7 @@ pip install -r requirements.txt
 
 #### Twitter Scraping
 
-- **Twitter Username and Password:** Use your Twitter account credentials. It's recommended to use an alternate account for security reasons.
+- **Twitter Username and Password:** Use your Twitter account credentials. It's recommended to use an alternate account for security reasons. Do not create a new account and immediately use the script.
 
 #### RapidAPI Key
 
