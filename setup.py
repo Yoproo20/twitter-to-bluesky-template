@@ -3,6 +3,14 @@ import os
 def prompt_user_for_input(prompt):
     return input(prompt).strip()
 
+def prompt_for_integer(prompt):
+    while True:
+        try:
+            value = int(prompt_user_for_input(prompt))
+            return value
+        except ValueError:
+            print("[ERROR] Please enter a valid integer.")
+
 def create_env_file():
     print("Welcome to the setup script for the Twitter to Bluesky bot.")
 
@@ -12,6 +20,7 @@ def create_env_file():
     bluesky_username = prompt_user_for_input("Enter your Bluesky handle/username: ")
     bluesky_password = prompt_user_for_input("Enter your Bluesky app-password: ")
     target_user = prompt_user_for_input("Enter the target Twitter user (without the @, ie: 'Yopro20_): ")
+    check_interval = prompt_for_integer("Enter the interval (in seconds) to check for new posts: ")
 
     env_content = f"""
 TWITTER_USERNAME={twitter_username}
@@ -20,6 +29,7 @@ RAPIDAPI_KEY={rapidapi_key}
 BLUESKY_USERNAME={bluesky_username}
 BLUESKY_PASSWORD={bluesky_password}
 TARGET_USER={target_user}
+CHECK_INTERVAL={check_interval}
 """
 
     with open('.env', 'w') as env_file:
