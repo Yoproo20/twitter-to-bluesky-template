@@ -74,6 +74,9 @@ python main.py
 - **API Errors:** Check your API keys and ensure they are correctly entered in the `.env` file.
 - **Login Issues:** Verify your Twitter and Bluesky credentials.
 
+## To-do
+- [] Add video support
+- [] Retweet function
 ## License
 
 This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
