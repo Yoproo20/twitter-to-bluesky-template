@@ -46,11 +46,11 @@ def init_bluesky_client() -> Client:
 
     session_string = get_session()
     if session_string:
-        print('Reusing session')
+        print('[PROCESS] Reusing session')
         logging.info('Reusing session')
         client.login(session_string=session_string)
     else:
-        print('Creating new session')
+        print('[PROCESS] Creating new session')
         logging.info('Creating new session')
         bluesky_username = os.getenv("BLUESKY_USERNAME")
         bluesky_password = os.getenv("BLUESKY_PASSWORD")
@@ -143,6 +143,7 @@ async def main():
                 print("[PROCESS] Sending request to the API...")
                 logging.info("Sending request to the API...")
                 response = requests.get(url, headers=headers, params=querystring)
+                logging.info("API Response: %s", response.json())
                 data = response.json()
 
                 # Print the tweet message
@@ -156,10 +157,8 @@ async def main():
                     print(f"[INFO] Cleaned Tweet Message: {cleaned_text}")
                     logging.info("Cleaned Tweet Message: %s", cleaned_text)
 
-                    # Build the post text with mention
-                    post_text = build_post_text(cleaned_text)
-                    print(f"[INFO] Post Text: {post_text}")
-                    logging.info("Post Text: %s", post_text)
+                    post_text = cleaned_text
+                    post_facets = []
 
                     # Download media files
                     images = []
@@ -172,6 +171,11 @@ async def main():
                             logging.info("Downloading media from %s...", media_url)
                             media_response = requests.get(media_url)
                             
+                            if media_response.status_code != 200:
+                                print(f"[ERROR] Failed to download media from {media_url}. Status code: {media_response.status_code}")
+                                logging.error("Failed to download media from %s. Status code: %d", media_url, media_response.status_code)
+                                continue
+
                             if media_type == "video":
                                 video_path = f"video{index}.mp4"
                                 with open(video_path, "wb") as file:
@@ -189,53 +193,79 @@ async def main():
 
                     # Post to BlueSky
                     if images or videos:
-                        print("[PROCESS] Posting to BlueSky...")
-                        logging.info("Posting to BlueSky...")
+                        print("[PROCESS] Posting to BlueSky with media...")
+                        logging.info("Posting to BlueSky with media...")
 
                         if images:
-                            for image_path in images:
-                                with open(image_path, 'rb') as img_file:
-                                    img_data = img_file.read()
-                                bluesky_client.send_image(
-                                    text=post_text["text"],
-                                    image=img_data,
-                                    image_alt='Tweet image'
+                            try:
+                                image_data = []
+                                image_alts = []
+                                for image_path in images:
+                                    with open(image_path, 'rb') as img_file:
+                                        image_data.append(img_file.read())
+                                    image_alts.append('Tweet image')
+
+                                # Use send_images for multiple image posts
+                                response = bluesky_client.send_images(
+                                    text=post_text,
+                                    images=image_data,
+                                    image_alts=image_alts
                                 )
-                            print("[SUCCESS] Posted images to BlueSky.")
-                            logging.info("Posted images to BlueSky.")
+                                print(f"[SUCCESS] Posted images to BlueSky. Response: {response}")
+                                logging.info("Posted images to BlueSky. Response: %s", response)
+                            except Exception as e:
+                                print(f"[ERROR] Failed to post images to BlueSky: {e}")
+                                logging.error("Failed to post images to BlueSky: %s", e)
 
                         if videos:
                             for video_path in videos:
-                                with open(video_path, 'rb') as vid_file:
-                                    vid_data = vid_file.read()
-                                
-                                # Upload video
-                                video_upload = bluesky_client.upload_video(VideoUploadData(video=vid_data))
-                                
-                                # Create video embed
-                                video_embed = VideoEmbed(
-                                    video=video_upload.video,
-                                    alt="Tweet video",
-                                    aspect_ratio=AspectRatio(width=16, height=9)  # Adjust aspect ratio as needed
-                                )
-                                
-                                # Post with video embed
-                                bluesky_client.send_post(
-                                    text=post_text["text"],
-                                    embed=video_embed
-                                )
-                            print("[SUCCESS] Posted videos to BlueSky.")
-                            logging.info("Posted videos to BlueSky.")
+                                try:
+                                    with open(video_path, 'rb') as vid_file:
+                                        vid_data = vid_file.read()
+                                    
+                                    # Use send_video for video posts
+                                    response = bluesky_client.send_video(
+                                        text=post_text,
+                                        video=vid_data,
+                                        video_alt="Tweet video"
+                                    )
+                                    print(f"[SUCCESS] Posted video to BlueSky. Response: {response}")
+                                    logging.info("Posted video to BlueSky. Response: %s", response)
+                                except Exception as e:
+                                    print(f"[ERROR] Failed to post video to BlueSky: {e}")
+                                    logging.error("Failed to post video to BlueSky: %s", e)
 
-                        # Delete media files locally
-                        for image_path in images:
+                    else:
+                        # Post text only if no media is present
+                        try:
+                            print("[PROCESS] Posting to BlueSky without media...")
+                            logging.info("Posting to BlueSky without media...")
+                            response = bluesky_client.send_post(
+                                text=post_text
+                            )
+                            print(f"[SUCCESS] Posted text to BlueSky. Response: {response}")
+                            logging.info("Posted text to BlueSky. Response: %s", response)
+                        except Exception as e:
+                            print(f"[ERROR] Failed to post text to BlueSky: {e}")
+                            logging.error("Failed to post text to BlueSky: %s", e)
+
+                    # Delete media files locally
+                    for image_path in images:
+                        try:
                             os.remove(image_path)
                             print(f"[INFO] Deleted {image_path}")
                             logging.info("Deleted %s", image_path)
-                        for video_path in videos:
+                        except Exception as e:
+                            print(f"[ERROR] Failed to delete {image_path}: {e}")
+                            logging.error("Failed to delete %s: %s", image_path, e)
+                    for video_path in videos:
+                        try:
                             os.remove(video_path)
                             print(f"[INFO] Deleted {video_path}")
                             logging.info("Deleted %s", video_path)
+                        except Exception as e:
+                            print(f"[ERROR] Failed to delete {video_path}: {e}")
+                            logging.error("Failed to delete %s: %s", video_path, e)
 
         else:
             print(f"[WARNING] No tweets found for the user '{target_username}'.")
