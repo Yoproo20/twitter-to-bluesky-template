@@ -10,6 +10,8 @@ from dotenv import load_dotenv
 from atproto import Client, SessionEvent, Session, client_utils
 from atproto_client.models.app.bsky.embed.defs import AspectRatio
 from atproto_client.models.app.bsky.richtext.facet import Mention
+from atproto_client.models.app.bsky.embed.video import Main as VideoEmbed, Caption
+from atproto_client.models.app.bsky.video.upload_video import Data as VideoUploadData
 
 # Set up logging
 logging.basicConfig(
@@ -161,39 +163,79 @@ async def main():
 
                     # Download media files
                     images = []
+                    videos = []
                     if "media" in data:
                         for index, media in enumerate(data["media"]):
                             media_url = media["url"]
+                            media_type = media.get("type", "image")  # Default to image if type not specified
                             print(f"[PROCESS] Downloading media from {media_url}...")
                             logging.info("Downloading media from %s...", media_url)
                             media_response = requests.get(media_url)
-                            image_path = f"image{index}.jpg"
-                            with open(image_path, "wb") as file:
-                                file.write(media_response.content)
-                            images.append(image_path)
-                            print(f"[SUCCESS] Downloaded {media_url} as {image_path}")
-                            logging.info("Downloaded %s as %s", media_url, image_path)
+                            
+                            if media_type == "video":
+                                video_path = f"video{index}.mp4"
+                                with open(video_path, "wb") as file:
+                                    file.write(media_response.content)
+                                videos.append(video_path)
+                                print(f"[SUCCESS] Downloaded {media_url} as {video_path}")
+                                logging.info("Downloaded %s as %s", media_url, video_path)
+                            else:
+                                image_path = f"image{index}.jpg"
+                                with open(image_path, "wb") as file:
+                                    file.write(media_response.content)
+                                images.append(image_path)
+                                print(f"[SUCCESS] Downloaded {media_url} as {image_path}")
+                                logging.info("Downloaded %s as %s", media_url, image_path)
 
                     # Post to BlueSky
-                    if images:
+                    if images or videos:
                         print("[PROCESS] Posting to BlueSky...")
                         logging.info("Posting to BlueSky...")
-                        for image_path in images:
-                            with open(image_path, 'rb') as img_file:
-                                img_data = img_file.read()
-                            bluesky_client.send_image(
-                                text=post_text["text"],
-                                image=img_data,
-                                image_alt='Tweet image'
-                            )
-                        print("[SUCCESS] Posted to BlueSky.")
-                        logging.info("Posted to BlueSky.")
 
-                        # Delete images locally
+                        if images:
+                            for image_path in images:
+                                with open(image_path, 'rb') as img_file:
+                                    img_data = img_file.read()
+                                bluesky_client.send_image(
+                                    text=post_text["text"],
+                                    image=img_data,
+                                    image_alt='Tweet image'
+                                )
+                            print("[SUCCESS] Posted images to BlueSky.")
+                            logging.info("Posted images to BlueSky.")
+
+                        if videos:
+                            for video_path in videos:
+                                with open(video_path, 'rb') as vid_file:
+                                    vid_data = vid_file.read()
+                                
+                                # Upload video
+                                video_upload = bluesky_client.upload_video(VideoUploadData(video=vid_data))
+                                
+                                # Create video embed
+                                video_embed = VideoEmbed(
+                                    video=video_upload.video,
+                                    alt="Tweet video",
+                                    aspect_ratio=AspectRatio(width=16, height=9)  # Adjust aspect ratio as needed
+                                )
+                                
+                                # Post with video embed
+                                bluesky_client.send_post(
+                                    text=post_text["text"],
+                                    embed=video_embed
+                                )
+                            print("[SUCCESS] Posted videos to BlueSky.")
+                            logging.info("Posted videos to BlueSky.")
+
+                        # Delete media files locally
                         for image_path in images:
                             os.remove(image_path)
                             print(f"[INFO] Deleted {image_path}")
                             logging.info("Deleted %s", image_path)
+                        for video_path in videos:
+                            os.remove(video_path)
+                            print(f"[INFO] Deleted {video_path}")
+                            logging.info("Deleted %s", video_path)
 
         else:
             print(f"[WARNING] No tweets found for the user '{target_username}'.")
