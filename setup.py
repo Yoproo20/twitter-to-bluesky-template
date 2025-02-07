@@ -12,12 +12,12 @@ def prompt_for_integer(prompt):
             print("[ERROR] Please enter a valid integer.")
 
 def create_env_file():
-    print("Welcome to the setup script for the Twitter to Bluesky bot.")
+    print("Welcome to the setup script for the Twitter to Bluesky bot. \n Please read the README before setting up.")
 
     twitter_username = prompt_user_for_input("Enter your Twitter account username: ")
     twitter_password = prompt_user_for_input("Enter your Twitter account password: ")
     rapidapi_key = prompt_user_for_input("Enter your RAPIDAPI key: ")
-    bluesky_username = prompt_user_for_input("Enter your Bluesky handle/username: ")
+    bluesky_username = prompt_user_for_input("Enter your Bluesky handle/username (ie: user.bsky.social): ")
     bluesky_password = prompt_user_for_input("Enter your Bluesky app-password: ")
     target_user = prompt_user_for_input("Enter the target Twitter user (without the @, ie: 'Yopro20_): ")
     check_interval = prompt_for_integer("Enter the interval (in seconds) to check for new posts: ")

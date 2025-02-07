@@ -68,6 +68,12 @@ python main.py
 - **Security:** It's recommended to use alternate accounts for Twitter/X to avoid your main account being rate limited.
 - **API Usage:** Be mindful of the API usage limits on RapidAPI to avoid your account being rate limited.
 - **Environment Variables:** Ensure your `.env` file is not exposed publicly as it contains sensitive information.
+- **Amazon Web Services (AWS):** With how Tweety (the scraper) handles getting posts, it is impossible to host the mirror on AWS **unless** you are using a proxy so the IP wont show as an AWS one. You have to set it up on your own if you use AWS.
+
+## Things that don't work (as of now)
+1. If the latest post is a reply then it won't work.
+2. If the post contains a video, Bluesky blocks videos over 60 seconds.
+3. NO VIDEO SUPPORT, I'm trying to make it easy and clean and videos are stupid on AT, so the only media supported is images right now
 
 ## Troubleshooting
 
@@ -76,7 +82,7 @@ python main.py
 
 ## To-do
 - [] Add video support
-- [] Retweet function
+
 ## License
 
 This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
