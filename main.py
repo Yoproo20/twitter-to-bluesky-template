@@ -8,10 +8,7 @@ from datetime import datetime, timezone
 from tweety import TwitterAsync
 from dotenv import load_dotenv
 from atproto import Client, SessionEvent, Session, client_utils
-from atproto_client.models.app.bsky.embed.defs import AspectRatio
-from atproto_client.models.app.bsky.richtext.facet import Mention
-from atproto_client.models.app.bsky.embed.video import Main as VideoEmbed, Caption
-from atproto_client.models.app.bsky.video.upload_video import Data as VideoUploadData
+from atproto_client.models.app.bsky.video.upload_video import Data
 
 # Set up logging
 logging.basicConfig(
@@ -61,8 +58,8 @@ def init_bluesky_client() -> Client:
 def clean_tweet_text(text: str) -> str:
     # Remove 'https://t.co' and the next 10 characters
     text = re.sub(r'https://t\.co.{10}', '', text)
-    # Replace 'RT ' at the beginning with '🔁'
-    text = re.sub(r'^RT ', '🔁 ', text)
+    # Replace 'RT ' at the beginning with ''
+    text = re.sub(r'^RT ', ' ', text)
     return text
 
 def build_post_text(tweet_text: str) -> dict:
