@@ -1,4 +1,5 @@
 # Twitter to Bluesky Bot
+ITS NOT PERFECT!!! still early
 ## Prerequisites
 
 - Python 3.7 or higher
