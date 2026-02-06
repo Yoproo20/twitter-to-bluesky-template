@@ -4,13 +4,13 @@ import requests
 import time
 import re
 import logging
+import signal
 from datetime import datetime, timezone
 from tweety import TwitterAsync
 from dotenv import load_dotenv
-from atproto import Client, SessionEvent, Session, client_utils
+from atproto import Client, SessionEvent, Session, client_utils, models
 from atproto_client.models.app.bsky.embed.video import Main as VideoEmbed
 import http.client
-import ssl
 import json
 from atproto_client.models.app.bsky.embed.images import Image, Main as ImageEmbed
 
@@ -24,12 +24,53 @@ logging.basicConfig(
 # Load environment variables
 load_dotenv()
 
-# Create an SSL context with a specific TLS version
-context = ssl.create_default_context()
-context.minimum_version = ssl.TLSVersion.TLSv1_2  # Use TLS 1.2 or higher
+# Shutdown flag for graceful exit
+shutdown_flag = False
 
-# Set up the connection directly to the API host
-conn = http.client.HTTPSConnection("twitter-video-and-image-downloader.p.rapidapi.com", context=context)
+# print signales
+def info(string: str):
+    print(f"[INFO] {string}")
+    logging.info(string)
+
+def warning(string: str):
+    print(f"[WARNING] {string}")
+    logging.warning(string)
+
+def error(string: str):
+    print(f"[ERROR] {string}")
+    logging.error(string)
+
+def process(string: str):
+    print(f"[PROCESS] {string}")
+    logging.info(string)
+
+def success(string: str):
+    print(f"[SUCCESS] {string}")
+    logging.info(string)
+
+
+def signal_handler(sig, frame):
+    """Handle shutdown signal (Ctrl+C)."""
+    global shutdown_flag
+    info("Shutdown signal received. Exiting gracefully...")
+    shutdown_flag = True
+
+# Register signal handler for Ctrl+C
+signal.signal(signal.SIGINT, signal_handler)
+
+def parse_bool(value: str, default: bool = False) -> bool:
+    if value is None:
+        return default
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+def load_config() -> dict:
+    return {
+        "target_username": os.getenv("TARGET_USER"),
+        "check_interval": int(os.getenv("CHECK_INTERVAL", 300)),
+        "enable_translation": parse_bool(os.getenv("ENABLE_TRANSLATION"), default=False),
+        "translation_from": os.getenv("TRANSLATION_FROM", "es"),
+        "translation_to": os.getenv("TRANSLATION_TO", "en"),
+    }
 
 def get_session() -> str:
     try:
@@ -42,10 +83,16 @@ def save_session(session_string: str) -> None:
     with open('session.txt', 'w') as f:
         f.write(session_string)
 
+def interruptible_sleep(seconds: int) -> None:
+    """Sleep for specified seconds, but check shutdown flag every second."""
+    for _ in range(seconds):
+        if shutdown_flag:
+            break
+        time.sleep(1)
+
 def on_session_change(event: SessionEvent, session: Session) -> None:
-    logging.info('Session changed: %s %s', event, repr(session))
     if event in (SessionEvent.CREATE, SessionEvent.REFRESH):
-        logging.info('Saving changed session')
+        info(f'Session changed: {event} {repr(session)}')
         save_session(session.export())
 
 def init_bluesky_client() -> Client:
@@ -54,23 +101,19 @@ def init_bluesky_client() -> Client:
 
     session_string = get_session()
     if session_string:
-        print('[PROCESS] Reusing session')
-        logging.info('Reusing session')
+        process('Reusing session')
         try:
             client.login(session_string=session_string)
             return client
         except Exception as e:
-            print(f"[WARNING] Failed to reuse session: {e}")
-            logging.warning("Failed to reuse session: %s", e)
+            warning(f"Failed to reuse session: {e}")    
 
-    print('[PROCESS] Creating new session')
-    logging.info('Creating new session')
+    process('Creating new session')
     bluesky_username = os.getenv("BLUESKY_USERNAME")
     bluesky_password = os.getenv("BLUESKY_PASSWORD")
     if not bluesky_username or not bluesky_password:
         error_message = "BLUESKY_USERNAME or BLUESKY_PASSWORD is not set."
-        print(f"[ERROR] {error_message}")
-        logging.error(error_message)
+        error(error_message)
         raise ValueError(error_message)
 
     client.login(bluesky_username, bluesky_password)
@@ -90,6 +133,58 @@ def clean_tweet_text(text: str) -> str:
     # Replace 'RT ' at the beginning with '🔁'
     text = re.sub(r'^RT ', '🔁 ', text)
     return text
+
+def translate_text(text: str, enable_translation: bool, from_lang: str, to_lang: str) -> str:
+    """Translate Spanish text to English using RapidAPI Free Google Translator."""
+    if not enable_translation:
+        return None
+    
+    try:
+        url = "https://free-google-translator.p.rapidapi.com/external-api/free-google-translator"
+        
+        querystring = {"from": from_lang, "to": to_lang, "query": text}
+        payload = {"translate": "rapidapi"}
+        
+        translator_api_key = os.getenv("TRANSLATOR_RAPIDAPI_KEY")
+        if not translator_api_key:
+            error("TRANSLATOR_RAPIDAPI_KEY is not set.")
+            return None
+
+        headers = {
+            "x-rapidapi-key": translator_api_key,
+            "x-rapidapi-host": "free-google-translator.p.rapidapi.com",
+            "Content-Type": "application/json"
+        }
+        
+        response = requests.post(url, json=payload, headers=headers, params=querystring, timeout=15)
+        if response.status_code == 200:
+            result = response.json()
+            translated = result.get("translation", "")
+            success(f"Translated text: {translated}")
+            return translated
+        else:
+            warning(f"Translation API returned status code {response.status_code}")
+            return None
+    except Exception as e:
+        error(f"Failed to translate text: {e}")
+        return None
+
+def send_translation_reply(bluesky_client, original_post, translated_text: str):
+    """Send a translation as a reply to the original post."""
+    try:
+        # Create a strong reference to the original post
+        post_ref = models.create_strong_ref(original_post)
+        
+        # Create the reply with parent and root pointing to the original post
+        reply = bluesky_client.send_post(
+            text=f"Translation: {translated_text}",
+            reply_to=models.AppBskyFeedPost.ReplyRef(parent=post_ref, root=post_ref)
+        )
+        success(f"Posted translation reply. Response: {reply}")
+        return reply
+    except Exception as e:
+        error(f"Failed to post translation reply: {e}")
+        return None
 
 def build_post_text(tweet_text: str) -> dict:
     builder = client_utils.TextBuilder().text(tweet_text)
@@ -111,8 +206,7 @@ async def upload_media(bluesky_client, media_path, media_type):
         upload_response = bluesky_client.com.atproto.repo.upload_blob(media_data)
         
         if upload_response and hasattr(upload_response, "blob"):
-            print(f"[SUCCESS] Successfully uploaded {media_type} to Bluesky.")
-            logging.info(f"Successfully uploaded {media_type} to Bluesky.")
+            success(f"Successfully uploaded {media_type} to Bluesky.")
             
             if media_type == "video":
                 return VideoEmbed(
@@ -125,37 +219,8 @@ async def upload_media(bluesky_client, media_path, media_type):
                     image=upload_response.blob
                 )
     except Exception as e:
-        print(f"[ERROR] Failed to upload {media_type}: {e}")
-        logging.error(f"Failed to upload {media_type}: {e}")
+        error(f"Failed to upload {media_type}: {e}")
     return None
-
-async def make_request_with_retry(conn, target_url, headers, max_retries=3):
-    for attempt in range(max_retries):
-        try:
-            conn.request("GET", target_url, headers=headers)
-            res = conn.getresponse()
-            if res.status == 200:
-                return res
-            else:
-                print(f"[WARNING] Request failed with status {res.status}. Retrying...")
-                logging.warning("Request failed with status %d. Retrying...", res.status)
-        except http.client.RemoteDisconnected as e:
-            print(f"[WARNING] Remote disconnected. Retrying... (Attempt {attempt + 1}/{max_retries})")
-            logging.warning("Remote disconnected. Retrying... (Attempt %d/%d)", attempt + 1, max_retries)
-            # Recreate the connection with the correct SSL context
-            conn = http.client.HTTPSConnection("twitter-video-and-image-downloader.p.rapidapi.com", context=context)
-        except ssl.SSLError as e:
-            print(f"[ERROR] SSL error: {e}. Retrying... (Attempt {attempt + 1}/{max_retries})")
-            logging.error("SSL error: %s. Retrying... (Attempt %d/%d)", e, attempt + 1, max_retries)
-            # Recreate the connection with the correct SSL context
-            conn = http.client.HTTPSConnection("twitter-video-and-image-downloader.p.rapidapi.com", context=context)
-        except Exception as e:
-            print(f"[ERROR] Unexpected error: {e}. Retrying... (Attempt {attempt + 1}/{max_retries})")
-            logging.error("Unexpected error: %s. Retrying... (Attempt %d/%d)", e, attempt + 1, max_retries)
-            # Recreate the connection with the correct SSL context
-            conn = http.client.HTTPSConnection("twitter-video-and-image-downloader.p.rapidapi.com", context=context)
-        time.sleep(2 ** attempt)  # Exponential backoff
-    raise Exception("Max retries reached. Failed to make request.")
 
 async def get_tweets_with_retry(app, user, max_retries=3):
     for attempt in range(max_retries):
@@ -165,251 +230,195 @@ async def get_tweets_with_retry(app, user, max_retries=3):
             if attempt == max_retries - 1:
                 raise
             wait_time = 2 ** (attempt + 1)  # Exponential backoff
-            print(f"[WARNING] Connection error (attempt {attempt + 1}/{max_retries}). Retrying in {wait_time} seconds...")
-            logging.warning("Connection error (attempt %d/%d). Retrying in %d seconds...", attempt + 1, max_retries, wait_time)
+            warning(f"Connection error (attempt {attempt + 1}/{max_retries}). Retrying in {wait_time} seconds...")
             await asyncio.sleep(wait_time)
         except Exception as e:
-            print(f"[ERROR] Unexpected error: {e}")
-            logging.error("Unexpected error: %s", e)
+            error(f"Unexpected error: {e}")
             raise
     return None
 
-async def main():
-    app = TwitterAsync("session")
-    username = os.getenv("TWITTER_USERNAME")
-    password = os.getenv("TWITTER_PASSWORD")
-    api_key = os.getenv("RAPIDAPI_KEY")
-    target_username = os.getenv("TARGET_USER")
-    print("[INFO] Target username:", target_username)
-    logging.info("Target username: %s", target_username)
+async def download_tweet_media(tweet):
+    images = []
+    videos = []
+    if hasattr(tweet, 'media') and tweet.media:
+        for index, media in enumerate(tweet.media):
+            try:
+                media_type = media.type if hasattr(media, 'type') else 'photo'
+                process(f"Downloading {media_type} media...")
 
-    if not target_username:
-        print("[ERROR] TARGET_USER is not set in the environment variables.")
-        logging.error("Error: TARGET_USER is not set in the environment variables.")
-        return
+                if media_type == "video":
+                    best_stream = await media.best_stream()
+                    if best_stream:
+                        video_path = await best_stream.download(filename=f"video{index}.mp4")
+                        if video_path:
+                            videos.append(video_path)
+                            success(f"Downloaded video as {video_path}")
+                    else:
+                        warning("No stream available for video")
+                else:
+                    image_path = await media.download(filename=f"image{index}.jpg")
+                    if image_path:
+                        images.append(image_path)
+                        success(f"Downloaded image as {image_path}")
+            except Exception as e:
+                error(f"Failed to download media: {e}")
+                continue
+    return images, videos
 
-    # Sign in to Twitter
-    print("[PROCESS] Signing in to Twitter...")
-    logging.info("Signing in to Twitter...")
-    await app.sign_in(username, password)
+async def post_to_bluesky(bluesky_client, post_text: str, images, videos, enable_translation: bool, from_lang: str, to_lang: str):
+    try:
+        if images or videos:
+            process("Posting to BlueSky with media...")
 
-    # Initialize BlueSky client
-    print("[PROCESS] Initializing BlueSky client...")
-    logging.info("Initializing BlueSky client...")
-    bluesky_client = init_bluesky_client()
+            image_objects = []
+            for image_path in images:
+                embed = await upload_media(bluesky_client, image_path, "image")
+                if embed:
+                    image_objects.append(embed)
 
+            video_embeds = []
+            for video_path in videos:
+                embed = await upload_media(bluesky_client, video_path, "video")
+                if embed:
+                    video_embeds.append(embed)
+
+            if image_objects:
+                image_embed = ImageEmbed(images=image_objects)
+                response = bluesky_client.send_post(
+                    text=post_text,
+                    embed=image_embed
+                )
+                success(f"Posted images to BlueSky. Response: {response}")
+                translated = translate_text(post_text, enable_translation, from_lang, to_lang)
+                if translated:
+                    send_translation_reply(bluesky_client, response, translated)
+
+            if video_embeds:
+                for video_embed in video_embeds:
+                    response = bluesky_client.send_post(
+                        text=post_text,
+                        embed=video_embed
+                    )
+                    success(f"Posted video to BlueSky. Response: {response}")
+                    translated = translate_text(post_text, enable_translation, from_lang, to_lang)
+                    if translated:
+                        send_translation_reply(bluesky_client, response, translated)
+        else:
+            process("Posting to BlueSky without media...")
+            response = bluesky_client.send_post(text=post_text)
+            success(f"Posted text to BlueSky. Response: {response}")
+            translated = translate_text(post_text, enable_translation, from_lang, to_lang)
+            if translated:
+                send_translation_reply(bluesky_client, response, translated)
+    except Exception as e:
+        error(f"Failed to post to BlueSky: {e}")
+
+async def process_tweet(tweet, bluesky_client, enable_translation: bool, from_lang: str, to_lang: str):
+    tweet_text = tweet.text if hasattr(tweet, 'text') else "No text available"
+    info(f"Original Tweet Message: {tweet_text}")
+
+    cleaned_text = clean_tweet_text(tweet_text)
+    info(f"Cleaned Tweet Message: {cleaned_text}")
+
+    images, videos = await download_tweet_media(tweet)
+    await post_to_bluesky(bluesky_client, cleaned_text, images, videos, enable_translation, from_lang, to_lang)
+
+    for image_path in images:
+        try:
+            os.remove(image_path)
+            info(f"Deleted {image_path}")
+        except Exception as e:
+            error(f"Failed to delete {image_path}: {e}")
+    for video_path in videos:
+        try:
+            os.remove(video_path)
+            info(f"Deleted {video_path}")
+        except Exception as e:
+            error(f"Failed to delete {video_path}: {e}")
+
+async def monitor_tweets(app, bluesky_client, target_username: str, check_interval: int, enable_translation: bool, from_lang: str, to_lang: str):
     last_tweet_id = None
-    check_interval = int(os.getenv("CHECK_INTERVAL", 300))  # defaulted to 5 seconds
 
-    while True:
-        print("[PROCESS] Checking for new tweets...")
-        logging.info("Checking for new tweets...")
-        
+    while not shutdown_flag:
+        process("Checking for new tweets...")
+
         try:
             user = await app.get_user_info(target_username)
             if not user:
-                print(f"[ERROR] Could not retrieve user info for '{target_username}'.")
-                logging.error("Error: Could not retrieve user info for '%s'.", target_username)
-                time.sleep(300)
+                error(f"Could not retrieve user info for '{target_username}'.")
+                interruptible_sleep(300)
                 continue
 
-            # Use the retry wrapper for get_tweets
             all_tweets = await get_tweets_with_retry(app, user)
             if all_tweets is None:
-                print(f"[ERROR] Could not retrieve tweets for '{target_username}'.")
-                logging.error("Error: Could not retrieve tweets for '%s'.", target_username)
-                time.sleep(300)
+                error(f"Could not retrieve tweets for '{target_username}'.")
+                interruptible_sleep(300)
                 continue
 
             if all_tweets:
-                # find most recent tweet by id
                 latest_tweet = None
                 for tweet in all_tweets:
                     if hasattr(tweet, 'id'):
                         latest_tweet = tweet
                         break
-                
+
                 if latest_tweet is None:
-                    print("[WARNING] No valid tweets found. Waiting for next check...")
-                    logging.warning("No valid tweets found. Waiting for next check...")
-                    time.sleep(check_interval)
+                    warning("No valid tweets found. Waiting for next check...")
+                    interruptible_sleep(check_interval)
                     continue
 
                 tweet_id = latest_tweet.id
-                print(f"[INFO] Latest Tweet ID: {tweet_id}")
-                logging.info("Latest Tweet ID: %s", tweet_id)
+                info(f"Latest Tweet ID: {tweet_id}")
 
                 if tweet_id != last_tweet_id:
                     last_tweet_id = tweet_id
-                    print(f"[SUCCESS] New Tweet ID: {tweet_id}")
-                    logging.info("New Tweet ID: %s", tweet_id)
-
-                    # turn id into url for API
-                    target_url = f"/twitter?url=https%3A%2F%2Fx.com%2F{target_username}%2Fstatus%2F{tweet_id}"
-                    headers = {
-                        'x-rapidapi-key': api_key,
-                        'x-rapidapi-host': "twitter-video-and-image-downloader.p.rapidapi.com"
-                    }
-
+                    success(f"New Tweet ID: {tweet_id}")
                     try:
-                        # Send the request 
-                        res = await make_request_with_retry(conn, target_url, headers)
-                        data = res.read()
-
-                        # decode bytes to string and parse as JSON
-                        try:
-                            json_data = json.loads(data.decode("utf-8"))
-                            print(json_data)
-                        except json.JSONDecodeError as e:
-                            print(f"Failed to decode JSON: {e}")
-                            json_data = {}
-
-                        # print the tweet in console
-                        if json_data.get("success"):
-                            print("Success!")
-                            tweet_text = json_data.get("text", "No text available")
-                            print(f"[INFO] Original Tweet Message: {tweet_text}")
-                            logging.info("Original Tweet Message: %s", tweet_text)
-
-                            # clean the tweet text
-                            cleaned_text = clean_tweet_text(tweet_text)
-                            print(f"[INFO] Cleaned Tweet Message: {cleaned_text}")
-                            logging.info("Cleaned Tweet Message: %s", cleaned_text)
-
-                            post_text = cleaned_text
-                            post_facets = []
-
-                            # check for media in the JSON data
-                            images = []
-                            videos = []
-                            if "media" in json_data:
-                                for index, media in enumerate(json_data["media"]):
-                                    media_url = media["url"]
-                                    media_type = media.get("type", "image")  
-                                    print(f"[PROCESS] Downloading media from {media_url}...")
-                                    logging.info("Downloading media from %s...", media_url)
-                                    media_response = requests.get(media_url)
-
-                                    if media_response.status_code != 200:
-                                        print(f"[ERROR] Failed to download media from {media_url}. Status code: {media_response.status_code}")
-                                        logging.error("Failed to download media from %s. Status code: %d", media_url, media_response.status_code)
-                                        continue
-
-                                    if media_type == "video":
-                                        video_path = f"video{index}.mp4"
-                                        with open(video_path, "wb") as file:
-                                            file.write(media_response.content)
-                                        videos.append(video_path)
-                                        print(f"[SUCCESS] Downloaded {media_url} as {video_path}")
-                                        logging.info("Downloaded %s as %s", media_url, video_path)
-                                    else:
-                                        image_path = f"image{index}.jpg"
-                                        with open(image_path, "wb") as file:
-                                            file.write(media_response.content)
-                                        images.append(image_path)
-                                        print(f"[SUCCESS] Downloaded {media_url} as {image_path}")
-                                        logging.info("Downloaded %s as %s", media_url, image_path)
-
-                            # post to bluesky
-                            if images or videos:
-                                print("[PROCESS] Posting to BlueSky with media...")
-                                logging.info("Posting to BlueSky with media...")
-
-                                try:
-                                    # upload and embed images
-                                    image_objects = []
-                                    for image_path in images:
-                                        embed = await upload_media(bluesky_client, image_path, "image")
-                                        if embed:
-                                            image_objects.append(embed)
-
-                                    # upload and embed videos
-                                    video_embeds = []
-                                    for video_path in videos:
-                                        embed = await upload_media(bluesky_client, video_path, "video")
-                                        if embed:
-                                            video_embeds.append(embed)
-
-                                    # post to bluesky
-                                    if image_objects:
-                                        # create an ImageEmbed with all images
-                                        image_embed = ImageEmbed(images=image_objects)
-                                        response = bluesky_client.send_post(
-                                            text=post_text,
-                                            embed=image_embed
-                                        )
-                                        print(f"[SUCCESS] Posted images to BlueSky. Response: {response}")
-                                        logging.info("Posted images to BlueSky. Response: %s", response)
-                                    
-                                    if video_embeds:
-                                        # if there are videos, post them in a separate post
-                                        for video_embed in video_embeds:
-                                            response = bluesky_client.send_post(
-                                                text=post_text,
-                                                embed=video_embed
-                                            )
-                                            print(f"[SUCCESS] Posted video to BlueSky. Response: {response}")
-                                            logging.info("Posted video to BlueSky. Response: %s", response)
-
-                                except Exception as e:
-                                    print(f"[ERROR] Failed to post media to BlueSky: {e}")
-                                    logging.error("Failed to post media to BlueSky: %s", e)
-
-                            else:
-                                # post text only if no media is present
-                                try:
-                                    print("[PROCESS] Posting to BlueSky without media...")
-                                    logging.info("Posting to BlueSky without media...")
-                                    response = bluesky_client.send_post(
-                                        text=post_text
-                                    )
-                                    print(f"[SUCCESS] Posted text to BlueSky. Response: {response}")
-                                    logging.info("Posted text to BlueSky. Response: %s", response)
-                                except Exception as e:
-                                    print(f"[ERROR] Failed to post text to BlueSky: {e}")
-                                    logging.error("Failed to post text to BlueSky: %s", e)
-
-                            # delete media files locally
-                            for image_path in images:
-                                try:
-                                    os.remove(image_path)
-                                    print(f"[INFO] Deleted {image_path}")
-                                    logging.info("Deleted %s", image_path)
-                                except Exception as e:
-                                    print(f"[ERROR] Failed to delete {image_path}: {e}")
-                                    logging.error("Failed to delete %s: %s", image_path, e)
-                            for video_path in videos:
-                                try:
-                                    os.remove(video_path)
-                                    print(f"[INFO] Deleted {video_path}")
-                                    logging.info("Deleted %s", video_path)
-                                except Exception as e:
-                                    print(f"[ERROR] Failed to delete {video_path}: {e}")
-                                    logging.error("Failed to delete %s: %s", video_path, e)
-
+                        await process_tweet(latest_tweet, bluesky_client, enable_translation, from_lang, to_lang)
                     except Exception as e:
-                        print(f"[ERROR] Failed to make request: {e}")
-                        logging.error("Failed to make request: %s", e)
-
+                        error(f"Failed to process tweet: {e}")
             else:
-                print(f"[WARNING] No tweets found for the user '{target_username}'.")
-                logging.info("No tweets found for the user '%s'.", target_username)
+                warning(f"No tweets found for the user '{target_username}'.")
 
-            # wait for the specified interval before checking again
-            print(f"[INFO] Waiting for {check_interval} seconds before checking again...")
-            logging.info("Waiting for %d seconds before checking again...", check_interval)
-            time.sleep(check_interval)
+            info(f"Waiting for {check_interval} seconds before checking again...")
+            interruptible_sleep(check_interval)
 
         except (http.client.RemoteDisconnected, http.client.HTTPException) as e:
-            print(f"[ERROR] Connection error: {e}. Waiting {check_interval} seconds...")
-            logging.error("Connection error: %s. Waiting %d seconds...", e, check_interval)
-            time.sleep(check_interval)
+            error(f"Connection error: {e}. Waiting {check_interval} seconds...")
+            interruptible_sleep(check_interval)
             continue
         except Exception as e:
-            print(f"[ERROR] Unexpected error: {e}. Waiting {check_interval} seconds...")
-            logging.error("Unexpected error: %s. Waiting %d seconds...", e, check_interval)
-            time.sleep(check_interval)
+            error(f"Unexpected error: {e}. Waiting {check_interval} seconds...")
+            interruptible_sleep(check_interval)
             continue
+
+    info("Script stopped gracefully.")
+
+async def main():
+    config = load_config()
+    target_username = config["target_username"]
+    check_interval = config["check_interval"]
+    enable_translation = config["enable_translation"]
+    from_lang = config["translation_from"]
+    to_lang = config["translation_to"]
+
+    info(f"Target username: {target_username}")
+
+    if not target_username:
+        error("TARGET_USER is not set in the environment variables.")
+        return
+
+    app = TwitterAsync("session")
+    username = os.getenv("TWITTER_USERNAME")
+    password = os.getenv("TWITTER_PASSWORD")
+
+    process("Signing in to Twitter...")
+    await app.sign_in(username, password)
+
+    process("Initializing BlueSky client...")
+    bluesky_client = init_bluesky_client()
+
+    await monitor_tweets(app, bluesky_client, target_username, check_interval, enable_translation, from_lang, to_lang)
 
 # Run the async function
 asyncio.run(main())
