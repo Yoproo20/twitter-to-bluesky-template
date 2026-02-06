@@ -1,11 +1,10 @@
 # Twitter to Bluesky Bot
-ITS NOT PERFECT!!! still early
 ## Prerequisites
 
 - Python 3.7 or higher
-- A Twitter account (preferably an alternate account for security reasons)
+- A Twitter account (**Highly recommend creating an alt account, wait a few days after creating it for highest chance of it not being banned**)
 - A Bluesky account
-- A RapidAPI account
+- A RapidAPI account (only for translation)
 
 ## Setup Instructions
 
@@ -29,10 +28,10 @@ pip install -r requirements.txt
 
 - **Twitter Username and Password:** Use your Twitter account credentials. It's recommended to use an alternate account for security reasons. Do not create a new account and immediately use the script.
 
-#### RapidAPI Key
+#### RapidAPI Key (translation only)
 
 - **Sign up for RapidAPI:** Go to [RapidAPI](https://rapidapi.com/) and create an account.
-- **Subscribe to the Twitter Video and Image Downloader API:** Search for "Twitter Video and Image Downloader" on RapidAPI and subscribe to the API. The free quota is 1000 per month.
+- **Subscribe to the Translate API:** Search for "https://rapidapi.com/joshimuddin8212/api/free-google-translator" and subscribe to the API. The free quota is 5,000 per month (means 5000 translations per post per month).
 - **Get Your API Key:** Once subscribed, navigate to the API's dashboard to find your API key.
 
 #### Bluesky API
@@ -50,11 +49,11 @@ python setup.py
 This script will prompt you for the following information:
 - Twitter account username
 - Twitter account password
-- RapidAPI key
 - Bluesky handle/username
 - Bluesky app-password
 - Target Twitter user handle (without the '@')
-- Interval in seconds to check for new posts
+- Interval in **seconds** to check for new posts
+- RapidAPI key (for translation only)
 
 ### 5. Running the Bot
 
@@ -71,18 +70,10 @@ python main.py
 - **Environment Variables:** Ensure your `.env` file is not exposed publicly as it contains sensitive information.
 - **Amazon Web Services (AWS):** With how Tweety (the scraper) handles getting posts, it is impossible to host the mirror on AWS **unless** you are using a proxy so the IP wont show as an AWS one. You have to set it up on your own if you use AWS.
 
-## Things that don't work (as of now)
-1. If the latest post is a reply then it won't work.
-2. If the post contains a video, Bluesky blocks videos over 60 seconds.
-3. NO VIDEO SUPPORT, I'm trying to make it easy and clean and videos are stupid on AT, so the only media supported is images right now
-
 ## Troubleshooting
 
 - **API Errors:** Check your API keys and ensure they are correctly entered in the `.env` file.
 - **Login Issues:** Verify your Twitter and Bluesky credentials.
-
-## To-do
-- [] Add video support
 
 ## License
 
