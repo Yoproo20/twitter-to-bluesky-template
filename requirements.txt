@@ -1,5 +1,5 @@
 asyncio
 requests
 python-dotenv
-tweety
+tweety-ns
 atproto
