@@ -16,12 +16,16 @@ cd twitter-to-bluesky-bot
 
 ### 2. Install Required Packages
 
-Install the necessary Python packages using pip:
+I recommend using [uv](https://docs.astral.sh/uv/getting-started/installation/) to install everything. You do you.
 
+Install the necessary Python packages using pip:
 ```bash
 pip install -r requirements.txt
 ```
-
+or uv:
+```bash
+uv pip install -r requirements.txt
+```
 ### 3. Obtain API Keys
 
 #### Twitter Scraping
@@ -31,7 +35,7 @@ pip install -r requirements.txt
 #### RapidAPI Key (translation only)
 
 - **Sign up for RapidAPI:** Go to [RapidAPI](https://rapidapi.com/) and create an account.
-- **Subscribe to the Translate API:** Search for "https://rapidapi.com/joshimuddin8212/api/free-google-translator" and subscribe to the API. The free quota is 5,000 per month (means 5000 translations per post per month).
+- **Subscribe to the Translate API:** Search for https://rapidapi.com/joshimuddin8212/api/free-google-translator and subscribe to the API. The free quota is 5,000 per month (means 5000 translations/post per month).
 - **Get Your API Key:** Once subscribed, navigate to the API's dashboard to find your API key.
 
 #### Bluesky API
@@ -41,11 +45,9 @@ pip install -r requirements.txt
 ### 4. Run the Setup Script
 
 Run the setup script to configure your environment:
-
 ```bash
 python setup.py
 ```
-
 This script will prompt you for the following information:
 - Twitter account username
 - Twitter account password
@@ -77,4 +79,4 @@ python main.py
 
 ## License
 
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+This project is licensed under the GNU General Public License v3.0. See the [LICENSE](LICENSE) file for details.
