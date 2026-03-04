@@ -5,6 +5,9 @@ import time
 import re
 import logging
 import signal
+import sys
+import threading
+import json
 from datetime import datetime, timezone
 from tweety import TwitterAsync
 from dotenv import load_dotenv
@@ -26,8 +29,10 @@ load_dotenv()
 
 # Shutdown flag for graceful exit
 shutdown_flag = False
+_shutdown_handled = False
+_stopped_message_shown = False
 
-# print signales
+# print signals
 def info(string: str):
     print(f"[INFO] {string}")
     logging.info(string)
@@ -50,18 +55,142 @@ def success(string: str):
 
 
 def signal_handler(sig, frame):
-    """Handle shutdown signal (Ctrl+C)."""
-    global shutdown_flag
+    # Handle shutdown signal (Ctrl+C)
+    global shutdown_flag, _shutdown_handled
+    if _shutdown_handled:
+        return
+    _shutdown_handled = True
     info("Shutdown signal received. Exiting gracefully...")
     shutdown_flag = True
 
 # Register signal handler for Ctrl+C
 signal.signal(signal.SIGINT, signal_handler)
 
+
+def _input_listener():
+    # Background thread: type 'check' and press Enter to trigger an immediate update check
+    while True:
+        try:
+            user_input = input().strip().lower()
+            if user_input == "check":
+                info("User requested update check...")
+                from updater import perform_update
+                perform_update()
+        except (EOFError, KeyboardInterrupt):
+            break
+        except Exception as e:
+            error(f"Input listener error: {e}")
+
+
+def start_update_input_listener():
+    # Start background thread that listens for 'check' command to trigger updates
+    if not sys.stdin.isatty():
+        return
+    thread = threading.Thread(target=_input_listener, daemon=True)
+    thread.start()
+    info("Type 'check' and press Enter to manually check for updates.")
+
+
+def _build_cookie_string(config: dict) -> str | None:
+    # Build cookie string from individual env vars. Returns None if auth_token missing
+    auth_token = config.get("twitter_auth_token")
+    if not auth_token:
+        return None
+    parts = []
+    if config.get("twitter_guest_id"):
+        parts.append(f"guest_id={config['twitter_guest_id']}")
+    parts.append(f"auth_token={auth_token}")
+    if config.get("twitter_ct0"):
+        parts.append(f"ct0={config['twitter_ct0']}")
+    if config.get("twitter_twid"):
+        parts.append(f"twid={config['twitter_twid']}")
+    return "; ".join(parts)
+
+
+async def init_twitter_app(config: dict):
+    # Initialize Twitter client. Prefers cookies/auth_token from .env, falls back to sign_in
+    app = TwitterAsync("session")
+
+    cookies = config.get("twitter_cookies")
+    if cookies:
+        process("Signing in to Twitter via cookies (TWITTER_COOKIES)...")
+        try:
+            await app.load_cookies(cookies)
+            success("Twitter session loaded from cookies.")
+            return app
+        except Exception as e:
+            warning(f"Failed to load cookies: {e}. Trying other methods...")
+
+    cookie_string = _build_cookie_string(config)
+    if cookie_string:
+        process("Signing in to Twitter via cookies (TWITTER_AUTH_TOKEN, etc.)...")
+        try:
+            await app.load_cookies(cookie_string)
+            success("Twitter session loaded from cookies.")
+            return app
+        except Exception as e:
+            warning(f"Failed to load cookies: {e}. Trying auth token only...")
+
+    auth_token = config.get("twitter_auth_token")
+    if auth_token:
+        process("Signing in to Twitter via auth token...")
+        try:
+            await app.load_auth_token(auth_token)
+            success("Twitter session loaded from auth token.")
+            return app
+        except Exception as e:
+            warning(f"Failed to load auth token: {e}. Falling back to username/password...")
+
+    username = config.get("twitter_username")
+    password = config.get("twitter_password")
+    if not username or not password:
+        error(
+            "No Twitter credentials found. Set TWITTER_AUTH_TOKEN (or TWITTER_COOKIES) "
+            "in .env, or TWITTER_USERNAME and TWITTER_PASSWORD."
+        )
+        raise ValueError("Missing Twitter credentials")
+    process("Signing in to Twitter via username/password...")
+    await app.sign_in(username, password)
+    success("Twitter session created.")
+    return app
+
+
 def parse_bool(value: str, default: bool = False) -> bool:
     if value is None:
         return default
     return value.strip().lower() in ("1", "true", "yes", "on")
+
+STATE_FILE = "state.json"
+
+
+def get_default_state() -> dict:
+    return {"last_tweet_id": None, "last_update_check": None}
+
+
+def load_state() -> dict:
+    try:
+        with open(STATE_FILE, "r") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return get_default_state()
+
+
+def save_state(state: dict) -> None:
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f, indent=2)
+
+
+def update_last_tweet_id(tweet_id) -> None:
+    state = load_state()
+    state["last_tweet_id"] = str(tweet_id)
+    save_state(state)
+
+
+def update_last_check_time() -> None:
+    state = load_state()
+    state["last_update_check"] = datetime.now(timezone.utc).isoformat()
+    save_state(state)
+
 
 def load_config() -> dict:
     return {
@@ -70,6 +199,15 @@ def load_config() -> dict:
         "enable_translation": parse_bool(os.getenv("ENABLE_TRANSLATION"), default=False),
         "translation_from": os.getenv("TRANSLATION_FROM", "es"),
         "translation_to": os.getenv("TRANSLATION_TO", "en"),
+        "auto_update": parse_bool(os.getenv("AUTO_UPDATE"), default=True),
+        "update_interval": int(os.getenv("UPDATE_CHECK_INTERVAL", 86400)),
+        "twitter_cookies": os.getenv("TWITTER_COOKIES"),
+        "twitter_auth_token": os.getenv("TWITTER_AUTH_TOKEN"),
+        "twitter_ct0": os.getenv("TWITTER_CT0"),
+        "twitter_guest_id": os.getenv("TWITTER_GUEST_ID"),
+        "twitter_twid": os.getenv("TWITTER_TWID"),
+        "twitter_username": os.getenv("TWITTER_USERNAME"),
+        "twitter_password": os.getenv("TWITTER_PASSWORD"),
     }
 
 def get_session() -> str:
@@ -84,7 +222,7 @@ def save_session(session_string: str) -> None:
         f.write(session_string)
 
 def interruptible_sleep(seconds: int) -> None:
-    """Sleep for specified seconds, but check shutdown flag every second."""
+    # Sleep for specified seconds, but check shutdown flag every second
     for _ in range(seconds):
         if shutdown_flag:
             break
@@ -135,7 +273,7 @@ def clean_tweet_text(text: str) -> str:
     return text
 
 def translate_text(text: str, enable_translation: bool, from_lang: str, to_lang: str) -> str:
-    """Translate Spanish text to English using RapidAPI Free Google Translator."""
+    # Translate one language text to another language using RapidAPI Free Google Translator
     if not enable_translation:
         return None
     
@@ -170,7 +308,7 @@ def translate_text(text: str, enable_translation: bool, from_lang: str, to_lang:
         return None
 
 def send_translation_reply(bluesky_client, original_post, translated_text: str):
-    """Send a translation as a reply to the original post."""
+    # Send a translation as a reply to the original post
     try:
         # Create a strong reference to the original post
         post_ref = models.create_strong_ref(original_post)
@@ -336,10 +474,49 @@ async def process_tweet(tweet, bluesky_client, enable_translation: bool, from_la
         except Exception as e:
             error(f"Failed to delete {video_path}: {e}")
 
-async def monitor_tweets(app, bluesky_client, target_username: str, check_interval: int, enable_translation: bool, from_lang: str, to_lang: str):
-    last_tweet_id = None
+async def monitor_tweets(
+    app,
+    bluesky_client,
+    target_username: str,
+    check_interval: int,
+    enable_translation: bool,
+    from_lang: str,
+    to_lang: str,
+    auto_update: bool,
+    update_interval: int,
+):
+    state = load_state()
+    last_tweet_id = state.get("last_tweet_id")
 
     while not shutdown_flag:
+        # Check for updates once per update_interval
+        if auto_update:
+            state = load_state()
+            last_update_check_str = state.get("last_update_check")
+            should_check_update = False
+
+            if last_update_check_str:
+                try:
+                    last_update_check = datetime.fromisoformat(last_update_check_str)
+                    elapsed = (datetime.now(timezone.utc) - last_update_check).total_seconds()
+                    should_check_update = elapsed >= update_interval
+                except Exception:
+                    should_check_update = True
+            else:
+                should_check_update = True
+
+            if should_check_update:
+                info("Checking for script updates...")
+                update_last_check_time()
+                try:
+                    from updater import perform_update
+                    if perform_update():
+                        success("Update applied. Script restarting...")
+                        return
+                    info("No update available.")
+                except Exception as e:
+                    warning(f"Update check failed: {e}")
+
         process("Checking for new tweets...")
 
         try:
@@ -356,11 +533,12 @@ async def monitor_tweets(app, bluesky_client, target_username: str, check_interv
                 continue
 
             if all_tweets:
+                # Pick the tweet with the highest ID (most recent)
                 latest_tweet = None
                 for tweet in all_tweets:
-                    if hasattr(tweet, 'id'):
-                        latest_tweet = tweet
-                        break
+                    if hasattr(tweet, "id"):
+                        if latest_tweet is None or tweet.id > latest_tweet.id:
+                            latest_tweet = tweet
 
                 if latest_tweet is None:
                     warning("No valid tweets found. Waiting for next check...")
@@ -370,8 +548,14 @@ async def monitor_tweets(app, bluesky_client, target_username: str, check_interv
                 tweet_id = latest_tweet.id
                 info(f"Latest Tweet ID: {tweet_id}")
 
-                if tweet_id != last_tweet_id:
-                    last_tweet_id = tweet_id
+                # Only post if this is a NEW tweet (not already posted)
+                # tweet_id > last_tweet_id ensures we never repost; last_tweet_id None = first run
+                is_new = last_tweet_id is None or str(tweet_id) > str(last_tweet_id)
+                if not is_new:
+                    info(f"Skipping already-posted tweet {tweet_id}.")
+                else:
+                    update_last_tweet_id(tweet_id)
+                    last_tweet_id = str(tweet_id)
                     success(f"New Tweet ID: {tweet_id}")
                     try:
                         await process_tweet(latest_tweet, bluesky_client, enable_translation, from_lang, to_lang)
@@ -392,15 +576,21 @@ async def monitor_tweets(app, bluesky_client, target_username: str, check_interv
             interruptible_sleep(check_interval)
             continue
 
-    info("Script stopped gracefully.")
+    global _stopped_message_shown
+    if not _stopped_message_shown:
+        _stopped_message_shown = True
+        info("Script stopped gracefully.")
 
 async def main():
+    start_update_input_listener()
     config = load_config()
     target_username = config["target_username"]
     check_interval = config["check_interval"]
     enable_translation = config["enable_translation"]
     from_lang = config["translation_from"]
     to_lang = config["translation_to"]
+    auto_update = config["auto_update"]
+    update_interval = config["update_interval"]
 
     info(f"Target username: {target_username}")
 
@@ -408,17 +598,22 @@ async def main():
         error("TARGET_USER is not set in the environment variables.")
         return
 
-    app = TwitterAsync("session")
-    username = os.getenv("TWITTER_USERNAME")
-    password = os.getenv("TWITTER_PASSWORD")
-
-    process("Signing in to Twitter...")
-    await app.sign_in(username, password)
+    app = await init_twitter_app(config)
 
     process("Initializing BlueSky client...")
     bluesky_client = init_bluesky_client()
 
-    await monitor_tweets(app, bluesky_client, target_username, check_interval, enable_translation, from_lang, to_lang)
+    await monitor_tweets(
+        app,
+        bluesky_client,
+        target_username,
+        check_interval,
+        enable_translation,
+        from_lang,
+        to_lang,
+        auto_update,
+        update_interval,
+    )
 
 # Run the async function
 asyncio.run(main())
