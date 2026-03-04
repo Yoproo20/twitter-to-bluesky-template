@@ -13,7 +13,7 @@
 
 ```bash
 git clone https://github.com/Yoproo20/twitter-to-bluesky-template.git
-cd twitter-to-bluesky-bot
+cd twitter-to-bluesky-template
 ```
 
 ### 2. Install Required Packages
@@ -22,6 +22,7 @@ I recommend using [uv](https://docs.astral.sh/uv/getting-started/installation/) 
 
 Install the necessary Python packages using pip:
 
+Install the necessary Python packages using pip:
 ```bash
 pip install -r requirements.txt
 ```
@@ -60,7 +61,6 @@ Run the setup script to configure the .env file:
 ```bash
 python setup.py
 ```
-
 This script will prompt you for the following information:
 
 - auth_token (only if you are using the primary method)
