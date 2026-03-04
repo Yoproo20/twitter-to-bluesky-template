@@ -27,7 +27,7 @@ load_dotenv()
 # Shutdown flag for graceful exit
 shutdown_flag = False
 
-# print signales
+# print signals
 def info(string: str):
     print(f"[INFO] {string}")
     logging.info(string)
