@@ -11,7 +11,7 @@
 ### 1. Clone the Repository
 ```bash
 git clone https://github.com/Yoproo20/twitter-to-bluesky-template.git
-cd twitter-to-bluesky-bot
+cd twitter-to-bluesky-template
 ```
 
 ### 2. Install Required Packages
