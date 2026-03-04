@@ -21,8 +21,6 @@ cd twitter-to-bluesky-template
 I recommend using [uv](https://docs.astral.sh/uv/getting-started/installation/) to install everything. You do you.
 
 Install the necessary Python packages using pip:
-
-Install the necessary Python packages using pip:
 ```bash
 pip install -r requirements.txt
 ```
