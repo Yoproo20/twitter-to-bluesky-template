@@ -1,7 +1,7 @@
 # Twitter to Bluesky Bot
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-[![BuyMeACoffee](https://raw.githubusercontent.com/pachadotdev/buymeacoffee-badges/main/bmc-blue.svg)](https://www.buymeacoffee.com/adam.bsky)
+[![BuyMeACoffee](https://raw.githubusercontent.com/pachadotdev/buymeacoffee-badges/main/bmc-blue.svg)](https://buymeacoffee.com/adamr.bsky)
 [![GitBook](https://img.shields.io/badge/GitBook-%23000000.svg?style=for-the-badge&logo=gitbook&logoColor=white)](https://bot-docs.yopro.studio/)
 
 Documentation at [https://bot-docs.yopro.studio/](https://bot-docs.yopro.studio/)
@@ -44,7 +44,7 @@ uv pip install -r requirements.txt
 
 **Primary (recommended):** Use cookies from your browser to bypass Cloudflare blocks. 
 
-**To know how to get the cookies, look at this guide for Firefox and Chrome based browsers:**  cookies.md
+**To know how to get the cookies, look at this guide for Firefox and Chrome based browsers:**  https://bot-docs.yopro.studio/getting-started/twitter-authentication#how-to-extract-cookies-from-your-browser
 
 **Secondary:** Twitter username and password. May be blocked by Cloudflare (no way to bypass using this method).
 
