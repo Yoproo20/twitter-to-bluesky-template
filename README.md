@@ -1,5 +1,11 @@
 # Twitter to Bluesky Bot
 
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+[![BuyMeACoffee](https://raw.githubusercontent.com/pachadotdev/buymeacoffee-badges/main/bmc-blue.svg)](https://www.buymeacoffee.com/adam.bsky)
+[![GitBook](https://img.shields.io/badge/GitBook-%23000000.svg?style=for-the-badge&logo=gitbook&logoColor=white)](https://bot-docs.yopro.studio/)
+
+Documentation at [https://bot-docs.yopro.studio/](https://bot-docs.yopro.studio/)
+
 ## Prerequisites
 
 - Python 3.7 or higher
@@ -22,7 +28,6 @@ I recommend using [uv](https://docs.astral.sh/uv/getting-started/installation/) 
 
 Install the necessary Python packages using pip:
 
-Install the necessary Python packages using pip:
 ```bash
 pip install -r requirements.txt
 ```
@@ -39,8 +44,7 @@ uv pip install -r requirements.txt
 
 **Primary (recommended):** Use cookies from your browser to bypass Cloudflare blocks. 
 
-**To know how to get the cookies, look at this guide for Firefox and Chrome based browsers:**  ![cookies.md](/cookies.md)
-
+**To know how to get the cookies, look at this guide for Firefox and Chrome based browsers:**  cookies.md
 
 **Secondary:** Twitter username and password. May be blocked by Cloudflare (no way to bypass using this method).
 
@@ -61,6 +65,7 @@ Run the setup script to configure the .env file:
 ```bash
 python setup.py
 ```
+
 This script will prompt you for the following information:
 
 - auth_token (only if you are using the primary method)
@@ -92,10 +97,13 @@ python main.py
 - **Environment Variables:** Ensure your `.env` file is not exposed publicly as it contains sensitive information.
 - **Amazon Web Services (AWS):** With how Tweety (the scraper) handles getting posts, it is impossible to host the mirror on AWS **unless** you are using a proxy so the IP wont show as an AWS one. You have to set it up on your own if you use AWS.
 - Setup a Python virtual environment and install the requirements in it.
+
 ```bash
 python -m venv venv
 ```
+
 or
+
 ```bash
 uv venv venv
 ```
