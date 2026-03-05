@@ -1,0 +1,13 @@
+services:
+  twitter-bluesky:
+    build: .
+    container_name: twitter-bluesky-bot
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - DATA_DIR=/app/data
+    volumes:
+      - twitter-bluesky-data:/app/data
+
+volumes:
+  twitter-bluesky-data:

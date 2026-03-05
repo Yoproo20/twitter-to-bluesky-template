@@ -3,11 +3,8 @@ import os
 import sys
 import requests
 
-logging.basicConfig(
-    filename="events.log",
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-)
+DATA_DIR = os.getenv("DATA_DIR", ".")
+VERSION_FILE = os.path.join(DATA_DIR, "version.txt")
 
 GITHUB_REPO = "Yoproo20/twitter-to-bluesky-template"
 
@@ -51,7 +48,7 @@ def get_current_version() -> str | None:
 
 def save_current_version(sha: str):
     try:
-        with open("version.txt", "w") as f:
+        with open(VERSION_FILE, "w") as f:
             f.write(sha)
         logging.info(f"Saved current version: {sha}")
     except Exception as e:

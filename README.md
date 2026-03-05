@@ -90,6 +90,16 @@ or
 python main.py
 ```
 
+### 6. Docker (optional)
+
+Run in Docker with auto-restart on server boot. See [DOCKER.md](DOCKER.md) for details.
+
+```bash
+cp .env.example .env
+# Edit .env with your credentials
+docker compose up -d --build
+```
+
 ## Precautions
 
 - **Security:** It's recommended to use alternate accounts for Twitter/X to avoid your main account being rate limited.

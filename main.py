@@ -17,15 +17,20 @@ import http.client
 import json
 from atproto_client.models.app.bsky.embed.images import Image, Main as ImageEmbed
 
-# Set up logging
-logging.basicConfig(
-    filename='events.log',
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
-
 # Load environment variables
 load_dotenv()
+
+# Data directory for persistent files (used by Docker; default current dir)
+DATA_DIR = os.getenv("DATA_DIR", ".")
+if DATA_DIR and not os.path.exists(DATA_DIR):
+    os.makedirs(DATA_DIR, exist_ok=True)
+
+# Set up logging (after DATA_DIR so logs go to data dir in Docker)
+logging.basicConfig(
+    filename=os.path.join(DATA_DIR, "events.log"),
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+)
 
 # Shutdown flag for graceful exit
 shutdown_flag = False
@@ -109,7 +114,8 @@ def _build_cookie_string(config: dict) -> str | None:
 
 async def init_twitter_app(config: dict):
     # Initialize Twitter client. Prefers cookies/auth_token from .env, falls back to sign_in
-    app = TwitterAsync("session")
+    session_path = os.path.join(DATA_DIR, "session")
+    app = TwitterAsync(session_path)
 
     cookies = config.get("twitter_cookies")
     if cookies:
@@ -160,7 +166,7 @@ def parse_bool(value: str, default: bool = False) -> bool:
         return default
     return value.strip().lower() in ("1", "true", "yes", "on")
 
-STATE_FILE = "state.json"
+STATE_FILE = os.path.join(DATA_DIR, "state.json")
 
 
 def get_default_state() -> dict:
@@ -210,15 +216,19 @@ def load_config() -> dict:
         "twitter_password": os.getenv("TWITTER_PASSWORD"),
     }
 
+SESSION_FILE = os.path.join(DATA_DIR, "session.txt")
+
+
 def get_session() -> str:
     try:
-        with open('session.txt') as f:
+        with open(SESSION_FILE) as f:
             return f.read()
     except FileNotFoundError:
         return None
 
+
 def save_session(session_string: str) -> None:
-    with open('session.txt', 'w') as f:
+    with open(SESSION_FILE, "w") as f:
         f.write(session_string)
 
 def interruptible_sleep(seconds: int) -> None:

@@ -1,0 +1,17 @@
+.git
+.gitignore
+.env
+venv
+__pycache__
+*.pyc
+*.pyo
+*.log
+state.json
+session*
+version.txt
+main.bak.py
+examples
+*.md
+!README.md
+todo.md
+cookies.md
