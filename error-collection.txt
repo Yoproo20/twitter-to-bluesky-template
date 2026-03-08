@@ -1,0 +1,8 @@
+[ERROR] Failed to post to BlueSky: Response(success=False, status_code=400, content=XrpcError(error='InvalidRequest', message='Invalid app.bsky.feed.post record: Record/text must not be longer than 300 graphemes'), headers={'x-powered-by': 'Express', 'access-control-allow-origin': '*', 'cache-control': 'private', 'vary': 'Authorization, Accept-Encoding', 'ratelimit-limit': '3000', 'ratelimit-reset': '1772749039', 'ratelimit-remaining': '2997', 'ratelimit-policy': '3000;w=300', 'content-type': 'application/json; charset=utf-8', 'content-length': '123', 'etag': 'W/"7b-5OYjOucrkx456vG6nIBiH/VZWIA"', 'date': 'Thu, 05 Mar 2026 22:12:27 GMT', 'keep-alive': 'timeout=90', 'strict-transport-security': 'max-age=63072000'})
+- that one means the character limit is too high
+
+Session changed: SessionEVENT.REFRESH <Session handle=[ACCOUNTHANDLE] did=[ACCOUNTDID]>
+Failed to upload
+- "Session changed: SessionEVENT.REFRESH" is an INFO log from on_session_change (main.py:242). It's normal—the atproto library refreshes the Bluesky session (new access token). Not an error.
+- "Failed to upload" is the actual error, from upload_media() (main.py:370) when upload_blob() raises. The full message should include the exception (e.g. "Failed to upload image: <exception>").
+- Cause can be server-side (Bluesky API: file too large, unsupported format, rate limit, auth) or code-side (network error, file not found, invalid path). Session refresh and upload failure can coincide but are usually unrelated.

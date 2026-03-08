@@ -13,9 +13,16 @@ from tweety import TwitterAsync
 from dotenv import load_dotenv
 from atproto import Client, SessionEvent, Session, client_utils, models
 from atproto_client.models.app.bsky.embed.video import Main as VideoEmbed
+from atproto_client.models.app.bsky.embed.defs import AspectRatio
 import http.client
 import json
 from atproto_client.models.app.bsky.embed.images import Image, Main as ImageEmbed
+
+try:
+    from PIL import Image as PILImage
+    _PIL_AVAILABLE = True
+except ImportError:
+    _PIL_AVAILABLE = False
 
 # Load environment variables
 load_dotenv()
@@ -345,6 +352,20 @@ def build_post_text(tweet_text: str) -> dict:
         "facets": post_facets
     }
 
+def get_image_aspect_ratio(media_path: str) -> AspectRatio | None:
+    """Get image dimensions for Bluesky aspect_ratio. Returns None if Pillow unavailable or on failure."""
+    if not _PIL_AVAILABLE:
+        return None
+    try:
+        with PILImage.open(media_path) as img:
+            w, h = img.size
+            if w >= 1 and h >= 1:
+                return AspectRatio(width=w, height=h)
+    except Exception as e:
+        warning(f"Could not read image dimensions for aspect ratio: {e}")
+    return None
+
+
 async def upload_media(bluesky_client, media_path, media_type):
     try:
         with open(media_path, 'rb') as f:
@@ -362,9 +383,11 @@ async def upload_media(bluesky_client, media_path, media_type):
                     alt="Video uploaded from tweet"
                 )
             elif media_type == "image":
+                aspect_ratio = get_image_aspect_ratio(media_path)
                 return Image(
                     alt="Image uploaded from tweet",
-                    image=upload_response.blob
+                    image=upload_response.blob,
+                    aspect_ratio=aspect_ratio
                 )
     except Exception as e:
         error(f"Failed to upload {media_type}: {e}")
