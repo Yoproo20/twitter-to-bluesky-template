@@ -275,16 +275,7 @@ def init_bluesky_client() -> Client:
 
     return client
 
-def remove_tco_links(text: str) -> str:
-    # Updated pattern to match all HTTP/HTTPS links
-    pattern = r'https?://\S+'
-    cleaned_text = re.sub(pattern, '', text)
-    cleaned_text = ' '.join(cleaned_text.split())
-    return cleaned_text
-
 def clean_tweet_text(text: str) -> str:
-    # Use the remove_tco_links function to clean the text
-    text = remove_tco_links(text)
     # Replace 'RT ' at the beginning with '🔁'
     text = re.sub(r'^RT ', '🔁 ', text)
     return text
@@ -330,9 +321,12 @@ def send_translation_reply(bluesky_client, original_post, translated_text: str):
         # Create a strong reference to the original post
         post_ref = models.create_strong_ref(original_post)
         
+        # Build text builder to parse hashtags in translation
+        builder = build_post_text(f"Translation: {translated_text}")
+        
         # Create the reply with parent and root pointing to the original post
         reply = bluesky_client.send_post(
-            text=f"Translation: {translated_text}",
+            text=builder,
             reply_to=models.AppBskyFeedPost.ReplyRef(parent=post_ref, root=post_ref)
         )
         success(f"Posted translation reply. Response: {reply}")
@@ -341,16 +335,28 @@ def send_translation_reply(bluesky_client, original_post, translated_text: str):
         error(f"Failed to post translation reply: {e}")
         return None
 
-def build_post_text(tweet_text: str) -> dict:
-    builder = client_utils.TextBuilder().text(tweet_text)
+def build_post_text(tweet_text: str) -> client_utils.TextBuilder:
+    builder = client_utils.TextBuilder()
     
-    post_text = builder.build_text()
-    post_facets = builder.build_facets()
+    # Split the text using regex to find hashtags, preserving the rest of the text
+    # Pattern explanation: matches `#` followed by word characters or supported punctuation
+    # and keeps the delimiters in the split result.
+    parts = re.split(r'(#[^\s#]+)', tweet_text)
     
-    return {
-        "text": post_text,
-        "facets": post_facets
-    }
+    for part in parts:
+        if not part:
+            continue
+        if part.startswith('#'):
+            # The atproto text builder expects the tag value without the hashtag
+            tag_value = part[1:].strip('.,!?:;')
+            if tag_value:
+                builder.tag(part, tag_value)
+            else:
+                builder.text(part)
+        else:
+            builder.text(part)
+            
+    return builder
 
 def get_image_aspect_ratio(media_path: str) -> AspectRatio | None:
     """Get image dimensions for Bluesky aspect_ratio. Returns None if Pillow unavailable or on failure."""
@@ -438,6 +444,8 @@ async def download_tweet_media(tweet):
 
 async def post_to_bluesky(bluesky_client, post_text: str, images, videos, enable_translation: bool, from_lang: str, to_lang: str):
     try:
+        builder = build_post_text(post_text)
+
         if images or videos:
             process("Posting to BlueSky with media...")
 
@@ -456,7 +464,7 @@ async def post_to_bluesky(bluesky_client, post_text: str, images, videos, enable
             if image_objects:
                 image_embed = ImageEmbed(images=image_objects)
                 response = bluesky_client.send_post(
-                    text=post_text,
+                    text=builder,
                     embed=image_embed
                 )
                 success(f"Posted images to BlueSky. Response: {response}")
@@ -467,7 +475,7 @@ async def post_to_bluesky(bluesky_client, post_text: str, images, videos, enable
             if video_embeds:
                 for video_embed in video_embeds:
                     response = bluesky_client.send_post(
-                        text=post_text,
+                        text=builder,
                         embed=video_embed
                     )
                     success(f"Posted video to BlueSky. Response: {response}")
@@ -476,13 +484,14 @@ async def post_to_bluesky(bluesky_client, post_text: str, images, videos, enable
                         send_translation_reply(bluesky_client, response, translated)
         else:
             process("Posting to BlueSky without media...")
-            response = bluesky_client.send_post(text=post_text)
+            response = bluesky_client.send_post(text=builder)
             success(f"Posted text to BlueSky. Response: {response}")
             translated = translate_text(post_text, enable_translation, from_lang, to_lang)
             if translated:
                 send_translation_reply(bluesky_client, response, translated)
     except Exception as e:
         error(f"Failed to post to BlueSky: {e}")
+        raise
 
 async def process_tweet(tweet, bluesky_client, enable_translation: bool, from_lang: str, to_lang: str):
     tweet_text = tweet.text if hasattr(tweet, 'text') else "No text available"
@@ -492,20 +501,22 @@ async def process_tweet(tweet, bluesky_client, enable_translation: bool, from_la
     info(f"Cleaned Tweet Message: {cleaned_text}")
 
     images, videos = await download_tweet_media(tweet)
-    await post_to_bluesky(bluesky_client, cleaned_text, images, videos, enable_translation, from_lang, to_lang)
 
-    for image_path in images:
-        try:
-            os.remove(image_path)
-            info(f"Deleted {image_path}")
-        except Exception as e:
-            error(f"Failed to delete {image_path}: {e}")
-    for video_path in videos:
-        try:
-            os.remove(video_path)
-            info(f"Deleted {video_path}")
-        except Exception as e:
-            error(f"Failed to delete {video_path}: {e}")
+    try:
+        await post_to_bluesky(bluesky_client, cleaned_text, images, videos, enable_translation, from_lang, to_lang)
+    finally:
+        for image_path in images:
+            try:
+                os.remove(image_path)
+                info(f"Deleted {image_path}")
+            except Exception as e:
+                error(f"Failed to delete {image_path}: {e}")
+        for video_path in videos:
+            try:
+                os.remove(video_path)
+                info(f"Deleted {video_path}")
+            except Exception as e:
+                error(f"Failed to delete {video_path}: {e}")
 
 async def monitor_tweets(
     app,
@@ -550,6 +561,26 @@ async def monitor_tweets(
                 except Exception as e:
                     warning(f"Update check failed: {e}")
 
+        # Reload configuration on each iteration to pick up .env changes
+        load_dotenv(override=True)
+        config = load_config()
+        
+        new_target = config.get("target_username")
+        if new_target and new_target != target_username:
+            info(f"Target username changed from '{target_username}' to '{new_target}'. Resetting last_tweet_id.")
+            target_username = new_target
+            state = load_state()
+            state["last_tweet_id"] = None
+            save_state(state)
+            last_tweet_id = None
+            
+        check_interval = config.get("check_interval", 300)
+        enable_translation = config.get("enable_translation", False)
+        from_lang = config.get("translation_from", "es")
+        to_lang = config.get("translation_to", "en")
+        auto_update = config.get("auto_update", True)
+        update_interval = config.get("update_interval", 86400)
+
         process("Checking for new tweets...")
 
         try:
@@ -587,13 +618,11 @@ async def monitor_tweets(
                 if not is_new:
                     info(f"Skipping already-posted tweet {tweet_id}.")
                 else:
+                    success(f"New Tweet ID: {tweet_id}")
+                    # await process_tweet directly, it will raise to the outer try/except if it fails
+                    await process_tweet(latest_tweet, bluesky_client, enable_translation, from_lang, to_lang)
                     update_last_tweet_id(tweet_id)
                     last_tweet_id = str(tweet_id)
-                    success(f"New Tweet ID: {tweet_id}")
-                    try:
-                        await process_tweet(latest_tweet, bluesky_client, enable_translation, from_lang, to_lang)
-                    except Exception as e:
-                        error(f"Failed to process tweet: {e}")
             else:
                 warning(f"No tweets found for the user '{target_username}'.")
 
@@ -605,8 +634,14 @@ async def monitor_tweets(
             interruptible_sleep(check_interval)
             continue
         except Exception as e:
-            error(f"Unexpected error: {e}. Waiting {check_interval} seconds...")
+            error(f"Unexpected error: {e}. Re-initializing clients before next check...")
             interruptible_sleep(check_interval)
+            try:
+                app = await init_twitter_app(config)
+                bluesky_client = init_bluesky_client()
+                success("Clients re-initialized successfully.")
+            except Exception as init_e:
+                error(f"Failed to re-initialize clients: {init_e}")
             continue
 
     global _stopped_message_shown
