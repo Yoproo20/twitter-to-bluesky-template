@@ -1,0 +1,11 @@
+spec:
+  name: twitter-to-blusky
+  services:
+    - name: worker
+      dockerfile_path: Dockerfile
+      github:
+        repo: Yoproo20/twitter-to-bluesky-template
+        branch: main
+        deploy_on_push: false
+        instance_count: 1
+        instance_size_slug: apps-s-1vcpu-0.5gb

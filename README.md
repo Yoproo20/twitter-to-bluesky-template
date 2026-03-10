@@ -6,6 +6,9 @@
 
 Documentation at [https://bot-docs.yopro.studio/](https://bot-docs.yopro.studio/)
 
+## Deploy to Cloud
+[![Deploy to DO](https://www.deploytodo.com/do-btn-blue.svg)](https://cloud.digitalocean.com/apps/new?repo=https://github.com/Yoproo20/twitter-to-bluesky-template/tree/main)
+
 ## Prerequisites
 
 - Python 3.7 or higher
