@@ -27,9 +27,18 @@ Required variables (see `.env.example` for full list):
 
 ### 2. Build and run
 
+**Option A: Build locally**
 ```bash
 docker compose up -d --build
 ```
+
+**Option B: Pre-built Docker Hub image**
+
+[View on Docker Hub](https://hub.docker.com/r/theypstudio/twitter-to-bluesky-mirror)
+```bash
+docker pull theypstudio/twitter-to-bluesky-mirror:main
+```
+*(If you are using Docker Compose, please replace `build: .` with `image: theypstudio/twitter-to-bluesky-mirror:main` in your `docker-compose.yml` file before starting the bot).*
 
 ### 3. View logs
 
@@ -37,17 +46,34 @@ docker compose up -d --build
 docker compose logs -f
 ```
 
+## Updating
+
+To update your container to the latest version:
+
+**If you built locally (Option A):**
+```bash
+git pull
+docker compose up -d --build
+```
+
+**If you use the Docker Hub image (Option B):**
+```bash
+docker pull theypstudio/twitter-to-bluesky-mirror:main
+docker compose up -d
+```
+*make sure to run the compose inside the directory of which you started in*
+
 ## Run on Boot
 
 The `docker-compose.yml` uses `restart: unless-stopped`. When your server boots:
 
-1. Docker daemon starts (enabled by default on Debian)
+1. Docker daemon starts (have to be enabled by your OS)
 2. The container automatically starts
 
 No extra setup needed. To ensure Docker starts on boot:
 
 ```bash
-sudo systemctl enable docker
+sudo systemctl enable docker # for Linux users, check your OS documentation for Windows/MacOS
 ```
 
 ## Commands

@@ -276,8 +276,12 @@ def init_bluesky_client() -> Client:
     return client
 
 def clean_tweet_text(text: str) -> str:
+    # Remove HTTP/HTTPS links (like t.co links)
+    text = re.sub(r'https?://\S+', '', text)
     # Replace 'RT ' at the beginning with '🔁'
     text = re.sub(r'^RT ', '🔁 ', text)
+    # Clean up any residual double spaces (not touching newlines)
+    text = re.sub(r'[ \t]{2,}', ' ', text).strip()
     return text
 
 def translate_text(text: str, enable_translation: bool, from_lang: str, to_lang: str) -> str:
