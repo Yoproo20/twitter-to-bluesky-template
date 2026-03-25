@@ -1,6 +1,8 @@
 asyncio
 requests
 python-dotenv
-tweety-ns
+# PyPI releases often lag X/Twitter frontend changes; upstream recommends main for fixes.
+# See https://github.com/mahrtayyab/tweety — reinstall/rebuild image when login breaks again.
+tweety-ns @ https://github.com/mahrtayyab/tweety/archive/refs/heads/main.zip
 atproto
 Pillow

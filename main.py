@@ -123,6 +123,7 @@ async def init_twitter_app(config: dict):
     # Initialize Twitter client. Prefers cookies/auth_token from .env, falls back to sign_in
     session_path = os.path.join(DATA_DIR, "session")
     app = TwitterAsync(session_path)
+    last_auth_error: Exception | None = None
 
     cookies = config.get("twitter_cookies")
     if cookies:
@@ -132,6 +133,7 @@ async def init_twitter_app(config: dict):
             success("Twitter session loaded from cookies.")
             return app
         except Exception as e:
+            last_auth_error = e
             warning(f"Failed to load cookies: {e}. Trying other methods...")
 
     cookie_string = _build_cookie_string(config)
@@ -142,6 +144,7 @@ async def init_twitter_app(config: dict):
             success("Twitter session loaded from cookies.")
             return app
         except Exception as e:
+            last_auth_error = e
             warning(f"Failed to load cookies: {e}. Trying auth token only...")
 
     auth_token = config.get("twitter_auth_token")
@@ -152,11 +155,22 @@ async def init_twitter_app(config: dict):
             success("Twitter session loaded from auth token.")
             return app
         except Exception as e:
+            last_auth_error = e
             warning(f"Failed to load auth token: {e}. Falling back to username/password...")
 
     username = config.get("twitter_username")
     password = config.get("twitter_password")
     if not username or not password:
+        had_token_or_cookies = bool(
+            config.get("twitter_cookies") or config.get("twitter_auth_token")
+        )
+        if had_token_or_cookies:
+            error(
+                "Twitter login failed using TWITTER_AUTH_TOKEN / TWITTER_COOKIES (X often breaks "
+                "unofficial clients). Rebuild the Docker image so tweety-ns is pulled from GitHub "
+                f"main, or set TWITTER_USERNAME and TWITTER_PASSWORD. Last error: {last_auth_error}"
+            )
+            raise ValueError("Twitter authentication failed") from last_auth_error
         error(
             "No Twitter credentials found. Set TWITTER_AUTH_TOKEN (or TWITTER_COOKIES) "
             "in .env, or TWITTER_USERNAME and TWITTER_PASSWORD."
@@ -205,22 +219,30 @@ def update_last_check_time() -> None:
     save_state(state)
 
 
+def _env_strip(key: str) -> str | None:
+    v = os.getenv(key)
+    if v is None:
+        return None
+    v = v.strip()
+    return v if v else None
+
+
 def load_config() -> dict:
     return {
-        "target_username": os.getenv("TARGET_USER"),
+        "target_username": _env_strip("TARGET_USER"),
         "check_interval": int(os.getenv("CHECK_INTERVAL", 300)),
         "enable_translation": parse_bool(os.getenv("ENABLE_TRANSLATION"), default=False),
         "translation_from": os.getenv("TRANSLATION_FROM", "es"),
         "translation_to": os.getenv("TRANSLATION_TO", "en"),
         "auto_update": parse_bool(os.getenv("AUTO_UPDATE"), default=True),
         "update_interval": int(os.getenv("UPDATE_CHECK_INTERVAL", 86400)),
-        "twitter_cookies": os.getenv("TWITTER_COOKIES"),
-        "twitter_auth_token": os.getenv("TWITTER_AUTH_TOKEN"),
-        "twitter_ct0": os.getenv("TWITTER_CT0"),
-        "twitter_guest_id": os.getenv("TWITTER_GUEST_ID"),
-        "twitter_twid": os.getenv("TWITTER_TWID"),
-        "twitter_username": os.getenv("TWITTER_USERNAME"),
-        "twitter_password": os.getenv("TWITTER_PASSWORD"),
+        "twitter_cookies": _env_strip("TWITTER_COOKIES"),
+        "twitter_auth_token": _env_strip("TWITTER_AUTH_TOKEN"),
+        "twitter_ct0": _env_strip("TWITTER_CT0"),
+        "twitter_guest_id": _env_strip("TWITTER_GUEST_ID"),
+        "twitter_twid": _env_strip("TWITTER_TWID"),
+        "twitter_username": _env_strip("TWITTER_USERNAME"),
+        "twitter_password": _env_strip("TWITTER_PASSWORD"),
     }
 
 SESSION_FILE = os.path.join(DATA_DIR, "session.txt")
