@@ -8,6 +8,9 @@ import signal
 import sys
 import threading
 import json
+import mimetypes
+import shutil
+import subprocess
 from datetime import datetime, timezone
 from tweety import TwitterAsync
 from dotenv import load_dotenv
@@ -15,7 +18,6 @@ from atproto import Client, SessionEvent, Session, client_utils, models
 from atproto_client.models.app.bsky.embed.video import Main as VideoEmbed
 from atproto_client.models.app.bsky.embed.defs import AspectRatio
 import http.client
-import json
 from atproto_client.models.app.bsky.embed.images import Image, Main as ImageEmbed
 
 try:
@@ -23,6 +25,34 @@ try:
     _PIL_AVAILABLE = True
 except ImportError:
     _PIL_AVAILABLE = False
+
+# X removed the webpack `ondemand.s` chunk map from `/?mx=2` (~2026-06), which breaks
+# tweety's x-client-transaction-id generation ("Couldn't get animation key indices").
+# Upstream fix is still unmerged (tweety#295 / PR#297); /home still has the manifest.
+try:
+    import bs4 as _bs4
+    from tweety.http import Request as _TweetyRequest
+    from tweety.transaction import find_on_demand_file as _find_on_demand_file
+
+    _original_get_home_html = _TweetyRequest.get_home_html
+
+    async def _patched_get_home_html(self):
+        home_page = await _original_get_home_html(self)
+        if home_page and not _find_on_demand_file(str(home_page)):
+            headers = self._get_request_headers()
+            headers.pop("authorization", None)
+            response = await self._session.request(
+                method="GET",
+                url="https://x.com/home",
+                headers=headers,
+            )
+            if response.status_code in range(200, 300):
+                home_page = _bs4.BeautifulSoup(response.content, "lxml")
+        return home_page
+
+    _TweetyRequest.get_home_html = _patched_get_home_html
+except Exception:
+    pass
 
 # Load environment variables
 load_dotenv()
@@ -64,6 +94,141 @@ def process(string: str):
 def success(string: str):
     print(f"[SUCCESS] {string}")
     logging.info(string)
+
+
+class AdvancePastTweet(Exception):
+    """Tweet cannot be mirrored to Bluesky (e.g. text over limit); caller should advance the cursor."""
+
+
+def _format_request_exception(e: BaseException) -> str:
+    parts = [f"{type(e).__name__}: {e!r}"]
+    if str(e).strip():
+        parts.append(str(e))
+    resp = getattr(e, "response", None)
+    if resp is not None:
+        parts.append(f"http={getattr(resp, 'status_code', '?')!r}")
+        content = getattr(resp, "content", None)
+        if content is not None:
+            parts.append(f"body={content!r}")
+    return " | ".join(parts)
+
+
+def _is_bluesky_text_limit_error(exc: BaseException) -> bool:
+    detail = _format_request_exception(exc).lower()
+    needles = (
+        "grapheme",
+        "too long",
+        "maxlength",
+        "max length",
+        "text exceeds",
+        "limit of 300",
+        "300 grapheme",
+    )
+    return any(n in detail for n in needles)
+
+
+def _send_post_or_skip_text_limit(bluesky_client, **kwargs):
+    try:
+        return bluesky_client.send_post(**kwargs)
+    except Exception as e:
+        if _is_bluesky_text_limit_error(e):
+            raise AdvancePastTweet(
+                "Post rejected by Bluesky (usually 300-grapheme text limit or related validation). "
+                f"Details: {_format_request_exception(e)}"
+            ) from e
+        raise
+
+
+VIDEO_JOB_TIMEOUT_SEC = 300
+VIDEO_POLL_INTERVAL_SEC = 2
+
+
+def get_video_aspect_ratio_ffprobe(media_path: str) -> AspectRatio | None:
+    if not shutil.which("ffprobe"):
+        return None
+    try:
+        proc = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=width,height",
+                "-of",
+                "json",
+                media_path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        data = json.loads(proc.stdout or "{}")
+        streams = data.get("streams") or []
+        if not streams:
+            return None
+        w, h = streams[0].get("width"), streams[0].get("height")
+        if w and h and int(w) >= 1 and int(h) >= 1:
+            return AspectRatio(width=int(w), height=int(h))
+    except Exception as e:
+        warning(f"Could not read video dimensions (ffprobe): {e}")
+    return None
+
+
+async def _poll_video_job_until_blob(bluesky_client, job_id: str, first_job):
+    job = first_job
+    deadline = time.monotonic() + VIDEO_JOB_TIMEOUT_SEC
+    while job.blob is None:
+        if time.monotonic() > deadline:
+            raise TimeoutError(f"Video job {job_id!r} did not complete within {VIDEO_JOB_TIMEOUT_SEC}s")
+        state = job.state or ""
+        if state == "JOB_STATE_FAILED":
+            raise RuntimeError(job.error or job.message or "Video processing failed")
+        await asyncio.sleep(VIDEO_POLL_INTERVAL_SEC)
+        status = bluesky_client.app.bsky.video.get_job_status({"job_id": job_id})
+        job = status.job_status
+    return job.blob
+
+
+async def upload_video_embed(bluesky_client, media_path: str) -> VideoEmbed | None:
+    try:
+        with open(media_path, "rb") as f:
+            video_bytes = f.read()
+    except OSError as e:
+        error(f"Failed to read video file: {e}")
+        return None
+
+    aspect_ratio = get_video_aspect_ratio_ffprobe(media_path)
+    alt = "Video uploaded from tweet"
+
+    try:
+        upload_resp = bluesky_client.app.bsky.video.upload_video(video_bytes)
+        job = upload_resp.job_status
+        blob = job.blob or await _poll_video_job_until_blob(bluesky_client, job.job_id, job)
+        success("Video processed via Bluesky video service.")
+        return VideoEmbed(video=blob, alt=alt, aspect_ratio=aspect_ratio)
+    except Exception as e:
+        warning(
+            f"Bluesky video service upload failed ({_format_request_exception(e)}); "
+            "trying direct repo uploadBlob with video/mp4..."
+        )
+
+    try:
+        upload_response = bluesky_client.com.atproto.repo.upload_blob(
+            video_bytes, headers={"Content-Type": "video/mp4"}
+        )
+        if upload_response and hasattr(upload_response, "blob"):
+            success("Uploaded video via repo.uploadBlob (video/mp4).")
+            return VideoEmbed(
+                video=upload_response.blob,
+                alt=alt,
+                aspect_ratio=aspect_ratio,
+            )
+        error(f"upload_blob returned unexpected response: {upload_response!r}")
+    except Exception as e:
+        error(f"Failed to upload video: {_format_request_exception(e)}")
+    return None
 
 
 def signal_handler(sig, frame):
@@ -399,30 +564,29 @@ def get_image_aspect_ratio(media_path: str) -> AspectRatio | None:
 
 
 async def upload_media(bluesky_client, media_path, media_type):
+    if media_type == "video":
+        return await upload_video_embed(bluesky_client, media_path)
+
     try:
-        with open(media_path, 'rb') as f:
+        with open(media_path, "rb") as f:
             media_data = f.read()
-        
-        # Upload the media to Bluesky
-        upload_response = bluesky_client.com.atproto.repo.upload_blob(media_data)
-        
+
+        mime, _ = mimetypes.guess_type(media_path)
+        upload_kwargs = {}
+        if mime:
+            upload_kwargs["headers"] = {"Content-Type": mime}
+        upload_response = bluesky_client.com.atproto.repo.upload_blob(media_data, **upload_kwargs)
+
         if upload_response and hasattr(upload_response, "blob"):
             success(f"Successfully uploaded {media_type} to Bluesky.")
-            
-            if media_type == "video":
-                return VideoEmbed(
-                    video=upload_response.blob,
-                    alt="Video uploaded from tweet"
-                )
-            elif media_type == "image":
-                aspect_ratio = get_image_aspect_ratio(media_path)
-                return Image(
-                    alt="Image uploaded from tweet",
-                    image=upload_response.blob,
-                    aspect_ratio=aspect_ratio
-                )
+            aspect_ratio = get_image_aspect_ratio(media_path)
+            return Image(
+                alt="Image uploaded from tweet",
+                image=upload_response.blob,
+                aspect_ratio=aspect_ratio,
+            )
     except Exception as e:
-        error(f"Failed to upload {media_type}: {e}")
+        error(f"Failed to upload {media_type}: {_format_request_exception(e)}")
     return None
 
 async def get_tweets_with_retry(app, user, max_retries=3):
@@ -489,9 +653,10 @@ async def post_to_bluesky(bluesky_client, post_text: str, images, videos, enable
 
             if image_objects:
                 image_embed = ImageEmbed(images=image_objects)
-                response = bluesky_client.send_post(
+                response = _send_post_or_skip_text_limit(
+                    bluesky_client,
                     text=builder,
-                    embed=image_embed
+                    embed=image_embed,
                 )
                 success(f"Posted images to BlueSky. Response: {response}")
                 translated = translate_text(post_text, enable_translation, from_lang, to_lang)
@@ -500,9 +665,10 @@ async def post_to_bluesky(bluesky_client, post_text: str, images, videos, enable
 
             if video_embeds:
                 for video_embed in video_embeds:
-                    response = bluesky_client.send_post(
+                    response = _send_post_or_skip_text_limit(
+                        bluesky_client,
                         text=builder,
-                        embed=video_embed
+                        embed=video_embed,
                     )
                     success(f"Posted video to BlueSky. Response: {response}")
                     translated = translate_text(post_text, enable_translation, from_lang, to_lang)
@@ -510,7 +676,7 @@ async def post_to_bluesky(bluesky_client, post_text: str, images, videos, enable
                         send_translation_reply(bluesky_client, response, translated)
         else:
             process("Posting to BlueSky without media...")
-            response = bluesky_client.send_post(text=builder)
+            response = _send_post_or_skip_text_limit(bluesky_client, text=builder)
             success(f"Posted text to BlueSky. Response: {response}")
             translated = translate_text(post_text, enable_translation, from_lang, to_lang)
             if translated:
@@ -645,10 +811,25 @@ async def monitor_tweets(
                     info(f"Skipping already-posted tweet {tweet_id}.")
                 else:
                     success(f"New Tweet ID: {tweet_id}")
-                    # await process_tweet directly, it will raise to the outer try/except if it fails
-                    await process_tweet(latest_tweet, bluesky_client, enable_translation, from_lang, to_lang)
-                    update_last_tweet_id(tweet_id)
-                    last_tweet_id = str(tweet_id)
+                    advanced = False
+                    try:
+                        await process_tweet(
+                            latest_tweet,
+                            bluesky_client,
+                            enable_translation,
+                            from_lang,
+                            to_lang,
+                        )
+                        advanced = True
+                    except AdvancePastTweet as e:
+                        warning(
+                            f"Not mirroring tweet {tweet_id} (e.g. Bluesky text limit); "
+                            f"advancing cursor. {e}"
+                        )
+                        advanced = True
+                    if advanced:
+                        update_last_tweet_id(tweet_id)
+                        last_tweet_id = str(tweet_id)
             else:
                 warning(f"No tweets found for the user '{target_username}'.")
 
