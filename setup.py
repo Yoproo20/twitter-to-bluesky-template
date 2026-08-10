@@ -82,6 +82,27 @@ def create_env_file():
             print("[INFO] Invalid input, using default value of 86400 seconds.")
             update_check_interval = "86400"
 
+    print("\n--- Webhook notifications (Chegou only for now) ---")
+    print("Optional: paste your Chegou webhook URL to get push alerts on phone.")
+    print("Leave blank to disable. Get a URL from https://chegou.dev")
+    webhook_url = prompt_user_for_input("WEBHOOK_URL [optional]: ")
+    webhook_channel = "bot"
+    webhook_status_hours = "6"
+    if webhook_url:
+        webhook_channel_input = prompt_user_for_input("WEBHOOK_CHANNEL [default: bot]: ").strip()
+        webhook_channel = webhook_channel_input or "bot"
+        hours_input = prompt_user_for_input(
+            "Status ping interval in hours [default: 6, 0=disable periodic]: "
+        ).strip()
+        if hours_input == "":
+            webhook_status_hours = "6"
+        else:
+            try:
+                webhook_status_hours = str(float(hours_input))
+            except ValueError:
+                print("[INFO] Invalid input, using default 6 hours.")
+                webhook_status_hours = "6"
+
     env_content = f"""
 TWITTER_AUTH_TOKEN={twitter_auth_token}
 TWITTER_CT0={twitter_ct0}
@@ -100,6 +121,9 @@ TRANSLATION_TO={translation_to}
 TRANSLATOR_RAPIDAPI_KEY={translator_rapidapi_key}
 AUTO_UPDATE={auto_update}
 UPDATE_CHECK_INTERVAL={update_check_interval}
+WEBHOOK_URL={webhook_url}
+WEBHOOK_CHANNEL={webhook_channel}
+WEBHOOK_STATUS_INTERVAL_HOURS={webhook_status_hours}
 """
 
     with open(".env", "w") as env_file:

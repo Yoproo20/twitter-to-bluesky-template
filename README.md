@@ -103,6 +103,18 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
+### 7. Webhook notifications (optional)
+
+For now, **only [Chegou](https://chegou.dev) is supported**. Install the Chegou app, copy your unique webhook URL, and set it in `.env`:
+
+```bash
+WEBHOOK_URL=https://api.chegou.dev/v1/YOUR_UNIQUE_TOKEN
+WEBHOOK_CHANNEL=bot
+WEBHOOK_STATUS_INTERVAL_HOURS=6
+```
+
+You will get a push when the bot **starts/comes online**, on **auth / upload / post failures**, and a periodic **status ping** every `WEBHOOK_STATUS_INTERVAL_HOURS` hours (set `0` to disable periodic pings). Successful mirrors do **not** send a webhook per post.
+
 ## Precautions
 
 - **Security:** It's recommended to use alternate accounts for Twitter/X to avoid your main account being rate limited.
