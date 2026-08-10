@@ -25,6 +25,12 @@ Required variables (see `.env.example` for full list):
 - `BLUESKY_USERNAME` – Your Bluesky handle
 - `BLUESKY_PASSWORD` – Your Bluesky app password
 
+Optional webhook push notifications (**Chegou only for now**):
+
+- `WEBHOOK_URL` – Your Chegou webhook URL from the app
+- `WEBHOOK_CHANNEL` – Channel label (default: `bot`)
+- `WEBHOOK_STATUS_INTERVAL_HOURS` – Hours between “still online” pings (default: `6`; `0` disables periodic status)
+
 ### 2. Build and run
 
 **Option A: Build locally**

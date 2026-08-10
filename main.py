@@ -74,6 +74,13 @@ shutdown_flag = False
 _shutdown_handled = False
 _stopped_message_shown = False
 
+# Runtime stats for periodic webhook status (not per-post notifications)
+_bot_started_at: datetime | None = None
+_posts_mirrored_since_start = 0
+_last_webhook_error_key: str | None = None
+_last_webhook_error_at: float = 0.0
+WEBHOOK_ERROR_DEBOUNCE_SEC = 300  # avoid spamming identical errors
+
 # print signals
 def info(string: str):
     print(f"[INFO] {string}")
@@ -94,6 +101,109 @@ def process(string: str):
 def success(string: str):
     print(f"[SUCCESS] {string}")
     logging.info(string)
+
+
+def _webhook_config() -> dict:
+    # Chegou-only for now: POST JSON {title, message, channel} to WEBHOOK_URL
+    url = _env_strip("WEBHOOK_URL")
+    if not url:
+        return {"enabled": False}
+    channel = _env_strip("WEBHOOK_CHANNEL") or "bot"
+    try:
+        status_hours = float(os.getenv("WEBHOOK_STATUS_INTERVAL_HOURS", "6"))
+    except ValueError:
+        status_hours = 6.0
+    if status_hours < 0:
+        status_hours = 0
+    return {
+        "enabled": True,
+        "url": url,
+        "channel": channel,
+        "status_interval_sec": int(status_hours * 3600),
+    }
+
+
+def send_webhook(title: str, message: str, *, channel: str | None = None) -> bool:
+    """Send a push notification via Chegou webhook. No-op if WEBHOOK_URL unset."""
+    cfg = _webhook_config()
+    if not cfg.get("enabled"):
+        return False
+
+    payload = {
+        "title": title[:120],
+        "message": message[:2000],
+        "channel": channel or cfg["channel"],
+    }
+    try:
+        resp = requests.post(
+            cfg["url"],
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=10,
+        )
+        if resp.status_code >= 400:
+            warning(f"Webhook returned HTTP {resp.status_code}: {resp.text[:200]}")
+            return False
+        info(f"Webhook sent: {title}")
+        return True
+    except Exception as e:
+        warning(f"Failed to send webhook: {e}")
+        return False
+
+
+def notify_error(title: str, message: str) -> None:
+    """Notify on errors with debounce so identical alerts are not spammed."""
+    global _last_webhook_error_key, _last_webhook_error_at
+    key = f"{title}|{message[:200]}"
+    now = time.monotonic()
+    if (
+        key == _last_webhook_error_key
+        and (now - _last_webhook_error_at) < WEBHOOK_ERROR_DEBOUNCE_SEC
+    ):
+        return
+    _last_webhook_error_key = key
+    _last_webhook_error_at = now
+    send_webhook(title, message)
+
+
+def maybe_send_status_webhook(target_username: str, last_tweet_id) -> None:
+    """Periodic health ping (hours), not on every mirrored post."""
+    cfg = _webhook_config()
+    if not cfg.get("enabled") or cfg["status_interval_sec"] <= 0:
+        return
+
+    state = load_state()
+    last_str = state.get("last_webhook_status")
+    should_send = False
+    if last_str:
+        try:
+            last_at = datetime.fromisoformat(last_str)
+            elapsed = (datetime.now(timezone.utc) - last_at).total_seconds()
+            should_send = elapsed >= cfg["status_interval_sec"]
+        except Exception:
+            should_send = True
+    else:
+        should_send = True
+
+    if not should_send:
+        return
+
+    uptime = "unknown"
+    if _bot_started_at is not None:
+        seconds = int((datetime.now(timezone.utc) - _bot_started_at).total_seconds())
+        hours, rem = divmod(seconds, 3600)
+        minutes = rem // 60
+        uptime = f"{hours}h {minutes}m"
+
+    hours = max(1, cfg["status_interval_sec"] // 3600)
+    msg = (
+        f"Bot is online. Target: @{target_username or '?'}. "
+        f"Uptime: {uptime}. Posts mirrored this run: {_posts_mirrored_since_start}. "
+        f"Last tweet id: {last_tweet_id or 'none'}."
+    )
+    if send_webhook(f"Status (every {hours}h)", msg):
+        state["last_webhook_status"] = datetime.now(timezone.utc).isoformat()
+        save_state(state)
 
 
 class AdvancePastTweet(Exception):
@@ -196,7 +306,9 @@ async def upload_video_embed(bluesky_client, media_path: str) -> VideoEmbed | No
         with open(media_path, "rb") as f:
             video_bytes = f.read()
     except OSError as e:
-        error(f"Failed to read video file: {e}")
+        msg = f"Failed to read video file: {e}"
+        error(msg)
+        notify_error("Video upload failed", msg)
         return None
 
     aspect_ratio = get_video_aspect_ratio_ffprobe(media_path)
@@ -225,9 +337,13 @@ async def upload_video_embed(bluesky_client, media_path: str) -> VideoEmbed | No
                 alt=alt,
                 aspect_ratio=aspect_ratio,
             )
-        error(f"upload_blob returned unexpected response: {upload_response!r}")
+        msg = f"upload_blob returned unexpected response: {upload_response!r}"
+        error(msg)
+        notify_error("Video upload failed", msg)
     except Exception as e:
-        error(f"Failed to upload video: {_format_request_exception(e)}")
+        msg = f"Failed to upload video: {_format_request_exception(e)}"
+        error(msg)
+        notify_error("Video upload failed", msg)
     return None
 
 
@@ -330,16 +446,20 @@ async def init_twitter_app(config: dict):
             config.get("twitter_cookies") or config.get("twitter_auth_token")
         )
         if had_token_or_cookies:
-            error(
+            msg = (
                 "Twitter login failed using TWITTER_AUTH_TOKEN / TWITTER_COOKIES (X often breaks "
                 "unofficial clients). Rebuild the Docker image so tweety-ns is pulled from GitHub "
                 f"main, or set TWITTER_USERNAME and TWITTER_PASSWORD. Last error: {last_auth_error}"
             )
+            error(msg)
+            notify_error("Twitter auth failed", msg)
             raise ValueError("Twitter authentication failed") from last_auth_error
-        error(
+        msg = (
             "No Twitter credentials found. Set TWITTER_AUTH_TOKEN (or TWITTER_COOKIES) "
             "in .env, or TWITTER_USERNAME and TWITTER_PASSWORD."
         )
+        error(msg)
+        notify_error("Twitter auth failed", msg)
         raise ValueError("Missing Twitter credentials")
     process("Signing in to Twitter via username/password...")
     await app.sign_in(username, password)
@@ -456,9 +576,14 @@ def init_bluesky_client() -> Client:
     if not bluesky_username or not bluesky_password:
         error_message = "BLUESKY_USERNAME or BLUESKY_PASSWORD is not set."
         error(error_message)
+        notify_error("Bluesky auth failed", error_message)
         raise ValueError(error_message)
 
-    client.login(bluesky_username, bluesky_password)
+    try:
+        client.login(bluesky_username, bluesky_password)
+    except Exception as e:
+        notify_error("Bluesky auth failed", _format_request_exception(e))
+        raise
 
     return client
 
@@ -586,7 +711,9 @@ async def upload_media(bluesky_client, media_path, media_type):
                 aspect_ratio=aspect_ratio,
             )
     except Exception as e:
-        error(f"Failed to upload {media_type}: {_format_request_exception(e)}")
+        msg = f"Failed to upload {media_type}: {_format_request_exception(e)}"
+        error(msg)
+        notify_error(f"{media_type.capitalize()} upload failed", msg)
     return None
 
 async def get_tweets_with_retry(app, user, max_retries=3):
@@ -682,7 +809,9 @@ async def post_to_bluesky(bluesky_client, post_text: str, images, videos, enable
             if translated:
                 send_translation_reply(bluesky_client, response, translated)
     except Exception as e:
-        error(f"Failed to post to BlueSky: {e}")
+        msg = f"Failed to post to BlueSky: {e}"
+        error(msg)
+        notify_error("Bluesky post failed", msg)
         raise
 
 async def process_tweet(tweet, bluesky_client, enable_translation: bool, from_lang: str, to_lang: str):
@@ -721,6 +850,7 @@ async def monitor_tweets(
     auto_update: bool,
     update_interval: int,
 ):
+    global _posts_mirrored_since_start
     state = load_state()
     last_tweet_id = state.get("last_tweet_id")
 
@@ -828,10 +958,13 @@ async def monitor_tweets(
                         )
                         advanced = True
                     if advanced:
+                        _posts_mirrored_since_start += 1
                         update_last_tweet_id(tweet_id)
                         last_tweet_id = str(tweet_id)
             else:
                 warning(f"No tweets found for the user '{target_username}'.")
+
+            maybe_send_status_webhook(target_username, last_tweet_id)
 
             info(f"Waiting for {check_interval} seconds before checking again...")
             interruptible_sleep(check_interval)
@@ -842,13 +975,16 @@ async def monitor_tweets(
             continue
         except Exception as e:
             error(f"Unexpected error: {e}. Re-initializing clients before next check...")
+            notify_error("Bot error", f"Unexpected error: {e}. Re-initializing clients...")
             interruptible_sleep(check_interval)
             try:
                 app = await init_twitter_app(config)
                 bluesky_client = init_bluesky_client()
                 success("Clients re-initialized successfully.")
             except Exception as init_e:
-                error(f"Failed to re-initialize clients: {init_e}")
+                msg = f"Failed to re-initialize clients: {init_e}"
+                error(msg)
+                notify_error("Client re-init failed", msg)
             continue
 
     global _stopped_message_shown
@@ -857,6 +993,7 @@ async def monitor_tweets(
         info("Script stopped gracefully.")
 
 async def main():
+    global _bot_started_at, _posts_mirrored_since_start
     start_update_input_listener()
     config = load_config()
     target_username = config["target_username"]
@@ -871,12 +1008,34 @@ async def main():
 
     if not target_username:
         error("TARGET_USER is not set in the environment variables.")
+        notify_error("Config error", "TARGET_USER is not set in the environment variables.")
         return
 
-    app = await init_twitter_app(config)
+    try:
+        app = await init_twitter_app(config)
 
-    process("Initializing BlueSky client...")
-    bluesky_client = init_bluesky_client()
+        process("Initializing BlueSky client...")
+        bluesky_client = init_bluesky_client()
+    except Exception as e:
+        notify_error("Startup failed", f"Could not start bot: {e}")
+        raise
+
+    _bot_started_at = datetime.now(timezone.utc)
+    _posts_mirrored_since_start = 0
+    webhook_cfg = _webhook_config()
+    if webhook_cfg.get("enabled"):
+        hours = max(1, webhook_cfg["status_interval_sec"] // 3600) if webhook_cfg["status_interval_sec"] else 0
+        status_note = (
+            f" Periodic status every {hours}h."
+            if webhook_cfg["status_interval_sec"] > 0
+            else " Periodic status disabled."
+        )
+        send_webhook(
+            "Bot online",
+            f"Twitter→Bluesky mirror started. Watching @{target_username}.{status_note}",
+        )
+    else:
+        info("WEBHOOK_URL not set; push notifications disabled.")
 
     await monitor_tweets(
         app,
