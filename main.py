@@ -242,9 +242,11 @@ def _send_post_or_skip_text_limit(bluesky_client, **kwargs):
         return bluesky_client.send_post(**kwargs)
     except Exception as e:
         if _is_bluesky_text_limit_error(e):
+            detail = _format_request_exception(e)
+            count = re.search(r"got (\d+)", detail)
+            suffix = f" (got {count.group(1)})" if count else ""
             raise AdvancePastTweet(
-                "Post rejected by Bluesky (usually 300-grapheme text limit or related validation). "
-                f"Details: {_format_request_exception(e)}"
+                f"Post text exceeds Bluesky's 300-character limit{suffix}; skipping tweet."
             ) from e
         raise
 
