@@ -209,6 +209,10 @@ def maybe_send_status_webhook(target_username: str, last_tweet_id) -> None:
 class AdvancePastTweet(Exception):
     """Tweet cannot be mirrored to Bluesky (e.g. text over limit); caller should advance the cursor."""
 
+    def __init__(self, message: str, *, notify: bool = False):
+        super().__init__(message)
+        self.notify = notify
+
 
 def _format_request_exception(e: BaseException) -> str:
     parts = [f"{type(e).__name__}: {e!r}"]
@@ -223,6 +227,11 @@ def _format_request_exception(e: BaseException) -> str:
     return " | ".join(parts)
 
 
+# Bluesky app.bsky.feed.post lexicon: max 300 graphemes / 3000 characters.
+# Over 3000 chars fails client-side record validation before the request is sent.
+BLUESKY_TEXT_MAX_CHARS = 3000
+
+
 def _is_bluesky_text_limit_error(exc: BaseException) -> bool:
     detail = _format_request_exception(exc).lower()
     needles = (
@@ -233,6 +242,8 @@ def _is_bluesky_text_limit_error(exc: BaseException) -> bool:
         "text exceeds",
         "limit of 300",
         "300 grapheme",
+        "3000 character",
+        "at most 3000",
     )
     return any(n in detail for n in needles)
 
@@ -246,7 +257,8 @@ def _send_post_or_skip_text_limit(bluesky_client, **kwargs):
             count = re.search(r"got (\d+)", detail)
             suffix = f" (got {count.group(1)})" if count else ""
             raise AdvancePastTweet(
-                f"Post text exceeds Bluesky's 300-character limit{suffix}; skipping tweet."
+                f"Post text exceeds Bluesky's text limit{suffix}; skipping tweet.",
+                notify="3000" in detail,
             ) from e
         raise
 
@@ -823,6 +835,13 @@ async def process_tweet(tweet, bluesky_client, enable_translation: bool, from_la
     cleaned_text = clean_tweet_text(tweet_text)
     info(f"Cleaned Tweet Message: {cleaned_text}")
 
+    if len(cleaned_text) > BLUESKY_TEXT_MAX_CHARS:
+        raise AdvancePastTweet(
+            f"Tweet text is {len(cleaned_text)} characters, over Bluesky's "
+            f"{BLUESKY_TEXT_MAX_CHARS}-character record limit; skipping tweet.",
+            notify=True,
+        )
+
     images, videos = await download_tweet_media(tweet)
 
     try:
@@ -958,6 +977,11 @@ async def monitor_tweets(
                             f"Not mirroring tweet {tweet_id} (e.g. Bluesky text limit); "
                             f"advancing cursor. {e}"
                         )
+                        if getattr(e, "notify", False):
+                            notify_error(
+                                f"Skipped overlong tweet {tweet_id}",
+                                f"Tweet {tweet_id} was skipped: {e}",
+                            )
                         advanced = True
                     if advanced:
                         _posts_mirrored_since_start += 1
