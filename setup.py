@@ -51,6 +51,28 @@ def create_env_file():
     target_user = prompt_user_for_input("Enter the target Twitter user (without the @, ie: 'Yopro20_): ")
     check_interval = prompt_for_integer("Enter the interval (in seconds) to check for new posts: ")
 
+    print("\n--- Pinned tweet mirroring ---")
+    print("If the target Twitter account has a pinned tweet, pin the matching Bluesky post.")
+    print("Mappings are stored in state.json. Unpinned Twitter posts are skipped (Bluesky is not unpinned).")
+    pin_mirror_input = prompt_user_for_input(
+        "Mirror pinned tweets to Bluesky? (yes/no) [default: yes]: "
+    ).lower()
+    if pin_mirror_input in ["", "yes", "y", "true", "1"]:
+        enable_pin_mirror = "true"
+    else:
+        enable_pin_mirror = "false"
+    pin_hours_input = prompt_user_for_input(
+        "Pin check interval in hours [default: 2, 0=check every loop]: "
+    ).strip()
+    if pin_hours_input == "":
+        pin_check_interval_hours = "2"
+    else:
+        try:
+            pin_check_interval_hours = str(float(pin_hours_input))
+        except ValueError:
+            print("[INFO] Invalid input, using default 2 hours.")
+            pin_check_interval_hours = "2"
+
     enable_translation_input = prompt_user_for_input("Do you want to enable translation? (yes/no): ").lower()
     enable_translation = str(enable_translation_input in ["yes", "y", "true", "1"])
 
@@ -115,6 +137,8 @@ BLUESKY_USERNAME={bluesky_username}
 BLUESKY_PASSWORD={bluesky_password}
 TARGET_USER={target_user}
 CHECK_INTERVAL={check_interval}
+ENABLE_PIN_MIRROR={enable_pin_mirror}
+PIN_CHECK_INTERVAL_HOURS={pin_check_interval_hours}
 ENABLE_TRANSLATION={enable_translation}
 TRANSLATION_FROM={translation_from}
 TRANSLATION_TO={translation_to}

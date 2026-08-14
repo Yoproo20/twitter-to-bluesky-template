@@ -487,18 +487,41 @@ def parse_bool(value: str, default: bool = False) -> bool:
     return value.strip().lower() in ("1", "true", "yes", "on")
 
 STATE_FILE = os.path.join(DATA_DIR, "state.json")
+_PIN_DEFAULT = {
+    "last_twitter_pin_id": None,
+    "last_applied_uri": None,
+    "last_checked_at": None,
+}
 
 
 def get_default_state() -> dict:
-    return {"last_tweet_id": None, "last_update_check": None}
+    return {
+        "last_tweet_id": None,
+        "last_update_check": None,
+        "mirrored_posts": {},
+        "pin": dict(_PIN_DEFAULT),
+    }
 
 
 def load_state() -> dict:
+    state = get_default_state()
     try:
         with open(STATE_FILE, "r") as f:
-            return json.load(f)
+            loaded = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
-        return get_default_state()
+        return state
+    if not isinstance(loaded, dict):
+        return state
+    state.update(loaded)
+    if not isinstance(state.get("mirrored_posts"), dict):
+        state["mirrored_posts"] = {}
+    pin = state.get("pin")
+    if not isinstance(pin, dict):
+        state["pin"] = dict(_PIN_DEFAULT)
+    else:
+        for key, value in _PIN_DEFAULT.items():
+            pin.setdefault(key, value)
+    return state
 
 
 def save_state(state: dict) -> None:
@@ -516,6 +539,197 @@ def update_last_check_time() -> None:
     state = load_state()
     state["last_update_check"] = datetime.now(timezone.utc).isoformat()
     save_state(state)
+
+
+def save_mirrored_post(tweet_id, bluesky_post) -> None:
+    uri = getattr(bluesky_post, "uri", None)
+    cid = getattr(bluesky_post, "cid", None)
+    if not tweet_id or not uri or not cid:
+        warning("Cannot save mirrored post mapping; missing tweet id, uri, or cid.")
+        return
+    state = load_state()
+    posts = state.setdefault("mirrored_posts", {})
+    posts[str(tweet_id)] = {
+        "uri": str(uri),
+        "cid": str(cid),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    save_state(state)
+    info(f"Saved tweet {tweet_id} -> Bluesky {uri} in state.json")
+
+
+def get_mirrored_post(tweet_id: str) -> dict | None:
+    if not tweet_id:
+        return None
+    entry = (load_state().get("mirrored_posts") or {}).get(str(tweet_id))
+    if not isinstance(entry, dict) or not entry.get("uri") or not entry.get("cid"):
+        return None
+    return {
+        "tweet_id": str(tweet_id),
+        "uri": entry["uri"],
+        "cid": entry["cid"],
+    }
+
+
+def load_pin_state() -> dict:
+    pin = load_state().get("pin") or {}
+    return {
+        "last_twitter_pin_id": pin.get("last_twitter_pin_id"),
+        "last_applied_uri": pin.get("last_applied_uri"),
+        "last_checked_at": pin.get("last_checked_at"),
+    }
+
+
+def save_pin_state(
+    *,
+    last_twitter_pin_id=...,
+    last_applied_uri=...,
+) -> None:
+    state = load_state()
+    pin = state.setdefault("pin", dict(_PIN_DEFAULT))
+    if last_twitter_pin_id is not ...:
+        pin["last_twitter_pin_id"] = last_twitter_pin_id
+    if last_applied_uri is not ...:
+        pin["last_applied_uri"] = last_applied_uri
+    pin["last_checked_at"] = datetime.now(timezone.utc).isoformat()
+    save_state(state)
+
+
+def _parse_pin_interval_sec() -> int:
+    raw = os.getenv("PIN_CHECK_INTERVAL_HOURS", "2")
+    try:
+        hours = float(raw)
+    except (TypeError, ValueError):
+        hours = 2.0
+    if hours < 0:
+        hours = 2.0
+    return int(hours * 3600)
+
+
+def get_twitter_pinned_tweet_id(user) -> str | None:
+    """Return the target account's current pinned tweet id, or None if unpinned."""
+    pinned = getattr(user, "pinned_tweets", None)
+    if not pinned:
+        return None
+    if isinstance(pinned, str):
+        return pinned.strip() or None
+    if isinstance(pinned, (list, tuple)):
+        for item in pinned:
+            if item is None:
+                continue
+            value = str(item).strip()
+            if value:
+                return value
+    return None
+
+
+def pin_bluesky_post(bluesky_client, uri: str, cid: str) -> bool:
+    """Pin a post on the Bluesky profile via app.bsky.actor.profile.pinnedPost."""
+    try:
+        current = bluesky_client.app.bsky.actor.profile.get(bluesky_client.me.did, "self")
+    except Exception as e:
+        msg = f"Failed to read Bluesky profile for pinning: {_format_request_exception(e)}"
+        error(msg)
+        notify_error("Bluesky pin failed", msg)
+        return False
+
+    record = current.value
+    existing = getattr(record, "pinned_post", None)
+    existing_uri = getattr(existing, "uri", None) if existing is not None else None
+    if existing_uri == uri:
+        info("Bluesky profile already has this post pinned.")
+        return True
+
+    strong_ref = models.ComAtprotoRepoStrongRef.Main(uri=uri, cid=cid)
+    if hasattr(record, "model_copy"):
+        record = record.model_copy(update={"pinned_post": strong_ref})
+    else:
+        record.pinned_post = strong_ref
+
+    try:
+        bluesky_client.com.atproto.repo.put_record(
+            {
+                "repo": bluesky_client.me.did,
+                "collection": "app.bsky.actor.profile",
+                "rkey": "self",
+                "record": record,
+                "swap_record": current.cid,
+            }
+        )
+        success(f"Pinned Bluesky post {uri}")
+        return True
+    except Exception as e:
+        msg = f"Failed to pin Bluesky post: {_format_request_exception(e)}"
+        error(msg)
+        notify_error("Bluesky pin failed", msg)
+        return False
+
+
+def maybe_sync_pinned_post(
+    bluesky_client,
+    user,
+    target_username: str,
+    interval_sec: int,
+    just_mirrored_id: str | None = None,
+) -> None:
+    """If Twitter's pin changed, pin the matching mirrored Bluesky post.
+
+    No Twitter pin: skip (does not unpin on Bluesky). Unchanged pin: wait
+    until the next interval. Missing state.json mapping: retry later.
+    """
+    twitter_pin = get_twitter_pinned_tweet_id(user)
+    pin_state = load_pin_state()
+
+    due = True
+    last_checked = pin_state.get("last_checked_at")
+    if interval_sec > 0 and last_checked:
+        try:
+            elapsed = (datetime.now(timezone.utc) - datetime.fromisoformat(last_checked)).total_seconds()
+            due = elapsed >= interval_sec
+        except Exception:
+            due = True
+
+    if just_mirrored_id and twitter_pin and str(just_mirrored_id) == str(twitter_pin):
+        due = True
+
+    if not due:
+        return
+
+    if not twitter_pin:
+        info(f"No pinned tweet on @{target_username}; skipping Bluesky pin sync.")
+        save_pin_state(last_twitter_pin_id=None)
+        return
+
+    already_applied = (
+        pin_state.get("last_twitter_pin_id") == twitter_pin and pin_state.get("last_applied_uri")
+    )
+    if already_applied and not (
+        just_mirrored_id and str(just_mirrored_id) == str(twitter_pin)
+    ):
+        info(f"Twitter pin {twitter_pin} unchanged; waiting until next pin check.")
+        save_pin_state(
+            last_twitter_pin_id=twitter_pin,
+            last_applied_uri=pin_state.get("last_applied_uri"),
+        )
+        return
+
+    mapping = get_mirrored_post(twitter_pin)
+    if not mapping:
+        warning(
+            f"Twitter pin {twitter_pin} for @{target_username} is not in state.json yet "
+            "(not mirrored, or posted before pin tracking). Will retry later."
+        )
+        save_pin_state()
+        return
+
+    process(f"Syncing Twitter pin {twitter_pin} to Bluesky {mapping['uri']}...")
+    if pin_bluesky_post(bluesky_client, mapping["uri"], mapping["cid"]):
+        save_pin_state(
+            last_twitter_pin_id=twitter_pin,
+            last_applied_uri=mapping["uri"],
+        )
+    else:
+        save_pin_state()
 
 
 def _env_strip(key: str) -> str | None:
@@ -542,6 +756,8 @@ def load_config() -> dict:
         "twitter_twid": _env_strip("TWITTER_TWID"),
         "twitter_username": _env_strip("TWITTER_USERNAME"),
         "twitter_password": _env_strip("TWITTER_PASSWORD"),
+        "enable_pin_mirror": parse_bool(os.getenv("ENABLE_PIN_MIRROR"), default=True),
+        "pin_check_interval_sec": _parse_pin_interval_sec(),
     }
 
 SESSION_FILE = os.path.join(DATA_DIR, "session.txt")
@@ -774,6 +990,7 @@ async def download_tweet_media(tweet):
     return images, videos
 
 async def post_to_bluesky(bluesky_client, post_text: str, images, videos, enable_translation: bool, from_lang: str, to_lang: str):
+    first_response = None
     try:
         builder = build_post_text(post_text)
 
@@ -799,6 +1016,8 @@ async def post_to_bluesky(bluesky_client, post_text: str, images, videos, enable
                     text=builder,
                     embed=image_embed,
                 )
+                if first_response is None:
+                    first_response = response
                 success(f"Posted images to BlueSky. Response: {response}")
                 translated = translate_text(post_text, enable_translation, from_lang, to_lang)
                 if translated:
@@ -811,6 +1030,8 @@ async def post_to_bluesky(bluesky_client, post_text: str, images, videos, enable
                         text=builder,
                         embed=video_embed,
                     )
+                    if first_response is None:
+                        first_response = response
                     success(f"Posted video to BlueSky. Response: {response}")
                     translated = translate_text(post_text, enable_translation, from_lang, to_lang)
                     if translated:
@@ -818,10 +1039,12 @@ async def post_to_bluesky(bluesky_client, post_text: str, images, videos, enable
         else:
             process("Posting to BlueSky without media...")
             response = _send_post_or_skip_text_limit(bluesky_client, text=builder)
+            first_response = response
             success(f"Posted text to BlueSky. Response: {response}")
             translated = translate_text(post_text, enable_translation, from_lang, to_lang)
             if translated:
                 send_translation_reply(bluesky_client, response, translated)
+        return first_response
     except Exception as e:
         msg = f"Failed to post to BlueSky: {e}"
         error(msg)
@@ -844,8 +1067,11 @@ async def process_tweet(tweet, bluesky_client, enable_translation: bool, from_la
 
     images, videos = await download_tweet_media(tweet)
 
+    response = None
     try:
-        await post_to_bluesky(bluesky_client, cleaned_text, images, videos, enable_translation, from_lang, to_lang)
+        response = await post_to_bluesky(
+            bluesky_client, cleaned_text, images, videos, enable_translation, from_lang, to_lang
+        )
     finally:
         for image_path in images:
             try:
@@ -859,6 +1085,7 @@ async def process_tweet(tweet, bluesky_client, enable_translation: bool, from_la
                 info(f"Deleted {video_path}")
             except Exception as e:
                 error(f"Failed to delete {video_path}: {e}")
+    return response
 
 async def monitor_tweets(
     app,
@@ -914,6 +1141,7 @@ async def monitor_tweets(
             target_username = new_target
             state = load_state()
             state["last_tweet_id"] = None
+            state["pin"] = dict(_PIN_DEFAULT)
             save_state(state)
             last_tweet_id = None
             
@@ -923,6 +1151,8 @@ async def monitor_tweets(
         to_lang = config.get("translation_to", "en")
         auto_update = config.get("auto_update", True)
         update_interval = config.get("update_interval", 86400)
+        enable_pin_mirror = config.get("enable_pin_mirror", True)
+        pin_check_interval_sec = config.get("pin_check_interval_sec", 7200)
 
         process("Checking for new tweets...")
 
@@ -939,6 +1169,7 @@ async def monitor_tweets(
                 interruptible_sleep(300)
                 continue
 
+            just_mirrored_id = None
             if all_tweets:
                 # Pick the tweet with the highest ID (most recent)
                 latest_tweet = None
@@ -948,47 +1179,57 @@ async def monitor_tweets(
                             latest_tweet = tweet
 
                 if latest_tweet is None:
-                    warning("No valid tweets found. Waiting for next check...")
-                    interruptible_sleep(check_interval)
-                    continue
-
-                tweet_id = latest_tweet.id
-                info(f"Latest Tweet ID: {tweet_id}")
-
-                # Only post if this is a NEW tweet (not already posted)
-                # tweet_id > last_tweet_id ensures we never repost; last_tweet_id None = first run
-                is_new = last_tweet_id is None or str(tweet_id) > str(last_tweet_id)
-                if not is_new:
-                    info(f"Skipping already-posted tweet {tweet_id}.")
+                    warning("No valid tweets found.")
                 else:
-                    success(f"New Tweet ID: {tweet_id}")
-                    advanced = False
-                    try:
-                        await process_tweet(
-                            latest_tweet,
-                            bluesky_client,
-                            enable_translation,
-                            from_lang,
-                            to_lang,
-                        )
-                        advanced = True
-                    except AdvancePastTweet as e:
-                        warning(
-                            f"Not mirroring tweet {tweet_id} (e.g. Bluesky text limit); "
-                            f"advancing cursor. {e}"
-                        )
-                        if getattr(e, "notify", False):
-                            notify_error(
-                                f"Skipped overlong tweet {tweet_id}",
-                                f"Tweet {tweet_id} was skipped: {e}",
+                    tweet_id = latest_tweet.id
+                    info(f"Latest Tweet ID: {tweet_id}")
+
+                    # Only post if this is a NEW tweet (not already posted)
+                    # tweet_id > last_tweet_id ensures we never repost; last_tweet_id None = first run
+                    is_new = last_tweet_id is None or str(tweet_id) > str(last_tweet_id)
+                    if not is_new:
+                        info(f"Skipping already-posted tweet {tweet_id}.")
+                    else:
+                        success(f"New Tweet ID: {tweet_id}")
+                        advanced = False
+                        try:
+                            response = await process_tweet(
+                                latest_tweet,
+                                bluesky_client,
+                                enable_translation,
+                                from_lang,
+                                to_lang,
                             )
-                        advanced = True
-                    if advanced:
-                        _posts_mirrored_since_start += 1
-                        update_last_tweet_id(tweet_id)
-                        last_tweet_id = str(tweet_id)
+                            if response is not None:
+                                save_mirrored_post(tweet_id, response)
+                                just_mirrored_id = str(tweet_id)
+                            advanced = True
+                        except AdvancePastTweet as e:
+                            warning(
+                                f"Not mirroring tweet {tweet_id} (e.g. Bluesky text limit); "
+                                f"advancing cursor. {e}"
+                            )
+                            if getattr(e, "notify", False):
+                                notify_error(
+                                    f"Skipped overlong tweet {tweet_id}",
+                                    f"Tweet {tweet_id} was skipped: {e}",
+                                )
+                            advanced = True
+                        if advanced:
+                            _posts_mirrored_since_start += 1
+                            update_last_tweet_id(tweet_id)
+                            last_tweet_id = str(tweet_id)
             else:
                 warning(f"No tweets found for the user '{target_username}'.")
+
+            if enable_pin_mirror:
+                maybe_sync_pinned_post(
+                    bluesky_client,
+                    user,
+                    target_username,
+                    pin_check_interval_sec,
+                    just_mirrored_id=just_mirrored_id,
+                )
 
             maybe_send_status_webhook(target_username, last_tweet_id)
 
@@ -1076,4 +1317,5 @@ async def main():
     )
 
 # Run the async function
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())

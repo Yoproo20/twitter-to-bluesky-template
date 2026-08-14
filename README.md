@@ -115,6 +115,15 @@ WEBHOOK_STATUS_INTERVAL_HOURS=6
 
 You will get a push when the bot **starts/comes online**, on **auth / upload / post failures**, and a periodic **status ping** every `WEBHOOK_STATUS_INTERVAL_HOURS` hours (set `0` to disable periodic pings). Successful mirrors do **not** send a webhook per post.
 
+### 8. Pinned tweet mirroring (optional)
+
+The bot stores each mirrored tweet’s Bluesky `uri`/`cid` in `state.json`. On a 2-hour interval (configurable), it reads the target Twitter account’s `pinned_tweets` via Tweety. If there is a pin and that tweet was already mirrored, it pins the matching post on Bluesky (`app.bsky.actor.profile` `pinnedPost`). If Twitter has no pin, it skips (it does **not** unpin Bluesky). Tweets pinned on Twitter before this feature ran cannot be matched until they are mirrored going forward.
+
+```
+ENABLE_PIN_MIRROR=true
+PIN_CHECK_INTERVAL_HOURS=2
+```
+
 ## Precautions
 
 - **Security:** It's recommended to use alternate accounts for Twitter/X to avoid your main account being rate limited.

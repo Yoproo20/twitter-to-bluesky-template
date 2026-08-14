@@ -95,7 +95,7 @@ sudo systemctl enable docker # for Linux users, check your OS documentation for 
 
 State is stored in a Docker volume `twitter-bluesky-data`:
 
-- `state.json` – Last tweet ID, update check time
+- `state.json` – Last tweet ID, mirrored tweet→Bluesky URIs, pin sync state, update check time
 - `session.txt` – Bluesky session
 - `events.log` – Log file
 - `version.txt` – Update version tracking
