@@ -606,9 +606,39 @@ def _parse_pin_interval_sec() -> int:
     return int(hours * 3600)
 
 
-def get_twitter_pinned_tweet_id(user) -> str | None:
+def get_twitter_pinned_tweet_id(user, timeline=None) -> str | None:
     """Return the target account's current pinned tweet id, or None if unpinned."""
+    candidates = []
     pinned = getattr(user, "pinned_tweets", None)
+    if pinned:
+        candidates.append(pinned)
+
+    raw_user = getattr(user, "_user", None)
+    if isinstance(raw_user, dict):
+        nested = raw_user.get("pinned_tweet_ids_str")
+        if nested:
+            candidates.append(nested)
+        legacy = raw_user.get("legacy") or {}
+        if isinstance(legacy, dict) and legacy.get("pinned_tweet_ids_str"):
+            candidates.append(legacy["pinned_tweet_ids_str"])
+
+    original = getattr(user, "_original_user", None)
+    if isinstance(original, dict) and original.get("pinned_tweet_ids_str"):
+        candidates.append(original["pinned_tweet_ids_str"])
+
+    for pinned in candidates:
+        pin_id = _first_pin_id(pinned)
+        if pin_id:
+            return pin_id
+
+    pinned_tweet = getattr(timeline, "pinned", None) if timeline is not None else None
+    tweet_id = getattr(pinned_tweet, "id", None)
+    if tweet_id:
+        return str(tweet_id)
+    return None
+
+
+def _first_pin_id(pinned) -> str | None:
     if not pinned:
         return None
     if isinstance(pinned, str):
@@ -620,7 +650,32 @@ def get_twitter_pinned_tweet_id(user) -> str | None:
             value = str(item).strip()
             if value:
                 return value
+    tweet_id = getattr(pinned, "id", None)
+    if tweet_id:
+        return str(tweet_id)
     return None
+
+
+def _pin_payload_debug(user, timeline=None) -> str:
+    parts = [f"user.pinned_tweets={getattr(user, 'pinned_tweets', None)!r}"]
+    timeline_pin = getattr(timeline, "pinned", None) if timeline is not None else None
+    parts.append(f"timeline.pinned.id={getattr(timeline_pin, 'id', None)!r}")
+    extras = []
+    for obj_name in ("_user", "_original_user"):
+        obj = getattr(user, obj_name, None)
+        if not isinstance(obj, dict):
+            continue
+        for key, value in obj.items():
+            if "pin" in str(key).lower():
+                extras.append(f"{obj_name}.{key}={value!r}")
+        legacy = obj.get("legacy") if obj_name == "_user" else None
+        if isinstance(legacy, dict):
+            for key, value in legacy.items():
+                if "pin" in str(key).lower():
+                    extras.append(f"_user.legacy.{key}={value!r}")
+    if extras:
+        parts.append("payload: " + ", ".join(extras))
+    return "; ".join(parts)
 
 
 def pin_bluesky_post(bluesky_client, uri: str, cid: str) -> bool:
@@ -671,21 +726,26 @@ def maybe_sync_pinned_post(
     target_username: str,
     interval_sec: int,
     just_mirrored_id: str | None = None,
+    timeline=None,
 ) -> None:
     """If Twitter's pin changed, pin the matching mirrored Bluesky post.
 
     No Twitter pin: skip (does not unpin on Bluesky). Unchanged pin: wait
     until the next interval. Missing state.json mapping: retry later.
     """
-    twitter_pin = get_twitter_pinned_tweet_id(user)
+    twitter_pin = get_twitter_pinned_tweet_id(user, timeline=timeline)
     pin_state = load_pin_state()
+    debug = _pin_payload_debug(user, timeline)
+    info(f"Pin check @{target_username}: twitter_pin={twitter_pin or 'none'} ({debug})")
 
     due = True
+    remaining = 0
     last_checked = pin_state.get("last_checked_at")
     if interval_sec > 0 and last_checked:
         try:
             elapsed = (datetime.now(timezone.utc) - datetime.fromisoformat(last_checked)).total_seconds()
             due = elapsed >= interval_sec
+            remaining = max(0, int(interval_sec - elapsed))
         except Exception:
             due = True
 
@@ -693,6 +753,11 @@ def maybe_sync_pinned_post(
         due = True
 
     if not due:
+        info(
+            f"Pin sync not due yet for @{target_username}; "
+            f"next Bluesky pin update in {remaining}s "
+            f"(interval {interval_sec}s)."
+        )
         return
 
     if not twitter_pin:
@@ -706,7 +771,10 @@ def maybe_sync_pinned_post(
     if already_applied and not (
         just_mirrored_id and str(just_mirrored_id) == str(twitter_pin)
     ):
-        info(f"Twitter pin {twitter_pin} unchanged; waiting until next pin check.")
+        info(
+            f"Twitter pin {twitter_pin} is already pinned on Bluesky "
+            f"({pin_state.get('last_applied_uri')}); waiting until next pin check."
+        )
         save_pin_state(
             last_twitter_pin_id=twitter_pin,
             last_applied_uri=pin_state.get("last_applied_uri"),
@@ -724,6 +792,7 @@ def maybe_sync_pinned_post(
 
     process(f"Syncing Twitter pin {twitter_pin} to Bluesky {mapping['uri']}...")
     if pin_bluesky_post(bluesky_client, mapping["uri"], mapping["cid"]):
+        success(f"Bluesky pin now matches Twitter pin {twitter_pin}")
         save_pin_state(
             last_twitter_pin_id=twitter_pin,
             last_applied_uri=mapping["uri"],
@@ -1229,7 +1298,10 @@ async def monitor_tweets(
                     target_username,
                     pin_check_interval_sec,
                     just_mirrored_id=just_mirrored_id,
+                    timeline=all_tweets,
                 )
+            else:
+                info("Pin mirroring disabled (ENABLE_PIN_MIRROR=false).")
 
             maybe_send_status_webhook(target_username, last_tweet_id)
 
@@ -1272,6 +1344,14 @@ async def main():
     update_interval = config["update_interval"]
 
     info(f"Target username: {target_username}")
+    if config.get("enable_pin_mirror", True):
+        hours = config.get("pin_check_interval_sec", 7200) / 3600
+        info(
+            f"Pinned-tweet mirroring enabled; Twitter pin is checked every loop, "
+            f"Bluesky pin updates at most every {hours:g}h."
+        )
+    else:
+        info("Pinned-tweet mirroring disabled (ENABLE_PIN_MIRROR=false).")
 
     if not target_username:
         error("TARGET_USER is not set in the environment variables.")
