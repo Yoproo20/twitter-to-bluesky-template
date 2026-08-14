@@ -734,7 +734,8 @@ def _normalize_post_text(text: str) -> str:
 
 def _search_query_from_text(text: str) -> str | None:
     stripped = re.sub(r'[+\-&|!(){}[\]^"~*?:\\/]', " ", text or "")
-    words = [w for w in stripped.split() if w]
+    stripped = re.sub(r"[^\w\s€$]", " ", stripped, flags=re.UNICODE)
+    words = [w for w in stripped.split() if len(w) > 1]
     if not words:
         return None
     query = " ".join(words[:12]).strip()
@@ -906,6 +907,15 @@ async def maybe_sync_pinned_post(
     debug = _pin_payload_debug(user, timeline)
     info(f"Pin check @{target_username}: twitter_pin={twitter_pin or 'none'} ({debug})")
 
+    if not twitter_pin:
+        info(f"No pinned tweet on @{target_username}; skipping Bluesky pin sync.")
+        save_pin_state(last_twitter_pin_id=None)
+        return
+
+    already_applied = (
+        pin_state.get("last_twitter_pin_id") == twitter_pin and pin_state.get("last_applied_uri")
+    )
+
     due = True
     remaining = 0
     last_checked = pin_state.get("last_checked_at")
@@ -917,31 +927,22 @@ async def maybe_sync_pinned_post(
         except Exception:
             due = True
 
-    if just_mirrored_id and twitter_pin and str(just_mirrored_id) == str(twitter_pin):
+    if just_mirrored_id and str(just_mirrored_id) == str(twitter_pin):
         due = True
 
-    if not due:
+    # Only wait if this exact Twitter pin was already applied on Bluesky.
+    # Unapplied / changed pins search and pin immediately.
+    if already_applied and not due:
         info(
-            f"Pin sync not due yet for @{target_username}; "
-            f"next Bluesky pin update in {remaining}s "
-            f"(interval {interval_sec}s)."
+            f"Twitter pin {twitter_pin} already synced to Bluesky "
+            f"({pin_state.get('last_applied_uri')}); next pin check in {remaining}s."
         )
         return
 
-    if not twitter_pin:
-        info(f"No pinned tweet on @{target_username}; skipping Bluesky pin sync.")
-        save_pin_state(last_twitter_pin_id=None)
-        return
-
-    already_applied = (
-        pin_state.get("last_twitter_pin_id") == twitter_pin and pin_state.get("last_applied_uri")
-    )
-    if already_applied and not (
-        just_mirrored_id and str(just_mirrored_id) == str(twitter_pin)
-    ):
+    if already_applied:
         info(
-            f"Twitter pin {twitter_pin} is already pinned on Bluesky "
-            f"({pin_state.get('last_applied_uri')}); waiting until next pin check."
+            f"Twitter pin {twitter_pin} unchanged; still pinned on Bluesky "
+            f"({pin_state.get('last_applied_uri')})."
         )
         save_pin_state(
             last_twitter_pin_id=twitter_pin,
@@ -964,9 +965,8 @@ async def maybe_sync_pinned_post(
     if not mapping:
         warning(
             f"Twitter pin {twitter_pin} for @{target_username} could not be matched "
-            "to a Bluesky post yet. Will retry later."
+            "to a Bluesky post yet. Will retry on the next tweet check."
         )
-        save_pin_state()
         return
 
     process(f"Syncing Twitter pin {twitter_pin} to Bluesky {mapping['uri']}...")
@@ -976,8 +976,6 @@ async def maybe_sync_pinned_post(
             last_twitter_pin_id=twitter_pin,
             last_applied_uri=mapping["uri"],
         )
-    else:
-        save_pin_state()
 
 
 def _env_strip(key: str) -> str | None:
