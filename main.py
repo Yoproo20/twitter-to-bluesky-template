@@ -12,6 +12,7 @@ import mimetypes
 import shutil
 import subprocess
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 from tweety import TwitterAsync
 from dotenv import load_dotenv
 from atproto import Client, SessionEvent, Session, client_utils, models
@@ -720,8 +721,174 @@ def pin_bluesky_post(bluesky_client, uri: str, cid: str) -> bool:
         return False
 
 
-def maybe_sync_pinned_post(
+PIN_SIMILARITY_MIN = 0.75
+PIN_SEARCH_LIMIT = 25
+PIN_FEED_PAGES = 3
+PIN_FEED_LIMIT = 100
+
+
+def _normalize_post_text(text: str) -> str:
+    cleaned = clean_tweet_text(text or "")
+    return re.sub(r"\s+", " ", cleaned).strip().lower()
+
+
+def _search_query_from_text(text: str) -> str | None:
+    stripped = re.sub(r'[+\-&|!(){}[\]^"~*?:\\/]', " ", text or "")
+    words = [w for w in stripped.split() if w]
+    if not words:
+        return None
+    query = " ".join(words[:12]).strip()
+    return query[:80] or None
+
+
+def _bsky_post_text(post) -> str:
+    record = getattr(post, "record", None)
+    return getattr(record, "text", None) or ""
+
+
+def _pick_similar_bsky_post(source_text: str, posts: list):
+    source_norm = _normalize_post_text(source_text)
+    exact = []
+    fuzzy = []
+    for post in posts:
+        uri = getattr(post, "uri", None)
+        cid = getattr(post, "cid", None)
+        if not uri or not cid:
+            continue
+        cand = _normalize_post_text(_bsky_post_text(post))
+        if source_norm and cand == source_norm:
+            exact.append(post)
+            continue
+        if source_norm and cand and len(source_norm) >= 8:
+            ratio = SequenceMatcher(None, source_norm, cand).ratio()
+            fuzzy.append((ratio, post))
+    if exact:
+        return exact[0], 1.0, "exact"
+    if fuzzy:
+        fuzzy.sort(key=lambda item: item[0], reverse=True)
+        ratio, post = fuzzy[0]
+        if ratio >= PIN_SIMILARITY_MIN:
+            return post, ratio, "similar"
+    return None, 0.0, None
+
+
+def _search_mirror_posts(bluesky_client, query: str) -> list:
+    try:
+        resp = bluesky_client.app.bsky.feed.search_posts(
+            {
+                "q": query,
+                "author": bluesky_client.me.did,
+                "limit": PIN_SEARCH_LIMIT,
+                "sort": "latest",
+            }
+        )
+        posts = list(getattr(resp, "posts", None) or [])
+        handle = getattr(bluesky_client.me, "handle", None) or bluesky_client.me.did
+        info(f"Bluesky search_posts author={handle!r} q={query!r} hits={len(posts)}")
+        return posts
+    except Exception as e:
+        warning(f"Bluesky search_posts failed: {_format_request_exception(e)}")
+        return []
+
+
+def _list_mirror_posts(bluesky_client) -> list:
+    posts = []
+    cursor = None
+    try:
+        for page in range(PIN_FEED_PAGES):
+            resp = bluesky_client.get_author_feed(
+                bluesky_client.me.did,
+                cursor=cursor,
+                filter="posts_no_replies",
+                limit=PIN_FEED_LIMIT,
+                include_pins=True,
+            )
+            for item in getattr(resp, "feed", None) or []:
+                post = getattr(item, "post", None)
+                if post is not None:
+                    posts.append(post)
+            cursor = getattr(resp, "cursor", None)
+            if not cursor:
+                break
+            info(f"Loaded Bluesky author feed page {page + 1}, {len(posts)} posts so far")
+        info(f"Bluesky author feed listed {len(posts)} posts for matching")
+    except Exception as e:
+        warning(f"Bluesky get_author_feed failed: {_format_request_exception(e)}")
+    return posts
+
+
+async def _get_twitter_tweet_for_pin(twitter_app, tweet_id: str, timeline=None):
+    pinned = getattr(timeline, "pinned", None) if timeline is not None else None
+    if pinned is not None and str(getattr(pinned, "id", "")) == str(tweet_id):
+        return pinned
+    if timeline is not None:
+        try:
+            for tweet in timeline:
+                if str(getattr(tweet, "id", "")) == str(tweet_id):
+                    return tweet
+        except TypeError:
+            pass
+    if twitter_app is None:
+        return None
+    try:
+        process(f"Fetching Twitter tweet {tweet_id} to match against Bluesky...")
+        return await twitter_app.tweet_detail(str(tweet_id))
+    except Exception as e:
+        warning(f"Could not fetch Twitter tweet {tweet_id}: {e}")
+        return None
+
+
+async def lookup_bluesky_post_for_tweet(
     bluesky_client,
+    twitter_app,
+    tweet_id: str,
+    timeline=None,
+) -> dict | None:
+    """Find the mirrored Bluesky post via search_posts, then get_author_feed."""
+    tweet = await _get_twitter_tweet_for_pin(twitter_app, tweet_id, timeline=timeline)
+    source_text = getattr(tweet, "text", None) if tweet is not None else None
+    if source_text is None:
+        warning(f"No Twitter text available for pin {tweet_id}; cannot search Bluesky.")
+        return None
+
+    cleaned = clean_tweet_text(source_text)
+    info(f"Matching Twitter pin {tweet_id} text against Bluesky: {cleaned[:120]!r}")
+
+    candidates = []
+    query = _search_query_from_text(cleaned)
+    if query:
+        candidates.extend(_search_mirror_posts(bluesky_client, query))
+
+    post, score, kind = _pick_similar_bsky_post(cleaned, candidates)
+    if post is None:
+        info("No Bluesky search match; scanning the mirror account feed...")
+        feed_posts = _list_mirror_posts(bluesky_client)
+        seen = {getattr(p, "uri", None) for p in candidates}
+        for feed_post in feed_posts:
+            uri = getattr(feed_post, "uri", None)
+            if uri and uri not in seen:
+                candidates.append(feed_post)
+                seen.add(uri)
+        post, score, kind = _pick_similar_bsky_post(cleaned, candidates)
+    if post is None:
+        warning(f"No similar Bluesky post found for Twitter pin {tweet_id}.")
+        return None
+
+    save_mirrored_post(tweet_id, post)
+    success(
+        f"Matched Twitter pin {tweet_id} to Bluesky {post.uri} "
+        f"({kind}, score={score:.2f})"
+    )
+    return {
+        "tweet_id": str(tweet_id),
+        "uri": post.uri,
+        "cid": post.cid,
+    }
+
+
+async def maybe_sync_pinned_post(
+    bluesky_client,
+    twitter_app,
     user,
     target_username: str,
     interval_sec: int,
@@ -731,7 +898,8 @@ def maybe_sync_pinned_post(
     """If Twitter's pin changed, pin the matching mirrored Bluesky post.
 
     No Twitter pin: skip (does not unpin on Bluesky). Unchanged pin: wait
-    until the next interval. Missing state.json mapping: retry later.
+    until the next interval. Missing state.json mapping: search the Bluesky
+    account for the same (or similar) text, then retry later if still unknown.
     """
     twitter_pin = get_twitter_pinned_tweet_id(user, timeline=timeline)
     pin_state = load_pin_state()
@@ -783,9 +951,20 @@ def maybe_sync_pinned_post(
 
     mapping = get_mirrored_post(twitter_pin)
     if not mapping:
+        info(
+            f"Twitter pin {twitter_pin} not in state.json; "
+            "searching the Bluesky mirror account for a matching post..."
+        )
+        mapping = await lookup_bluesky_post_for_tweet(
+            bluesky_client,
+            twitter_app,
+            twitter_pin,
+            timeline=timeline,
+        )
+    if not mapping:
         warning(
-            f"Twitter pin {twitter_pin} for @{target_username} is not in state.json yet "
-            "(not mirrored, or posted before pin tracking). Will retry later."
+            f"Twitter pin {twitter_pin} for @{target_username} could not be matched "
+            "to a Bluesky post yet. Will retry later."
         )
         save_pin_state()
         return
@@ -1292,8 +1471,9 @@ async def monitor_tweets(
                 warning(f"No tweets found for the user '{target_username}'.")
 
             if enable_pin_mirror:
-                maybe_sync_pinned_post(
+                await maybe_sync_pinned_post(
                     bluesky_client,
+                    app,
                     user,
                     target_username,
                     pin_check_interval_sec,
